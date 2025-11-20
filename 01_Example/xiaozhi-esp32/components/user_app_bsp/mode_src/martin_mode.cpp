@@ -1,0 +1,636 @@
+#include <format>
+#include <cstdio>
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_log.h"
+#include "user_app.h"
+#include <iostream>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <chrono>
+#include <iomanip>
+#include <string.h>
+#include "esp_log.h"
+#include "esp_system.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "esp_sntp.h"
+#include "mbedtls/debug.h"
+#include "cJSON.h"
+#include "epaper_port.h"
+#include "GUI_Paint.h"
+#include "private.h"
+#include "esp_sleep.h"
+#include "button_bsp.h"
+#include "driver/rtc_io.h"
+
+#define ext_wakeup_pin_1 GPIO_NUM_0 
+#define ext_wakeup_pin_2 GPIO_NUM_5 
+#define ext_wakeup_pin_3 GPIO_NUM_4 
+
+#define MAX_HTTP_OUTPUT_BUFFER 2048*16
+
+static char *output_buffer;  // Buffer to store response
+static int output_len;       // Current length of data
+
+static const char *TAG = "wifi_http";
+
+static uint8_t *epd_blackImage = NULL; 
+static uint32_t Imagesize;             
+
+
+static RTC_DATA_ATTR int basic_rtc_set_time = 60 * 60;// User sets the wake-up time in seconds. // The default is 60 seconds. It is awakened by a timer.
+
+static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
+static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
+ 
+static uint8_t           wakeup_basic_flag = 0;
+
+
+cJSON* root;
+
+// Event handler for Wi-Fi
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "Retrying Wi-Fi connection...");
+    }
+}
+
+
+
+static void get_wakeup_gpio(void) {
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    if (ESP_SLEEP_WAKEUP_EXT1 == wakeup_reason) {
+        uint64_t wakeup_pins = esp_sleep_get_ext1_wakeup_status();
+        if (wakeup_pins == 0)
+            return;
+        if (wakeup_pins & (1ULL << ext_wakeup_pin_1)) {
+            // esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+            // //Disable the previous timer first
+            // esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+            // //Reset the 10-second timer
+            xEventGroupSetBits(boot_groups, set_bit_button(0)); 
+        } else if (wakeup_pins & (1ULL << ext_wakeup_pin_3)) {
+            return;
+        }
+    } else if (ESP_SLEEP_WAKEUP_TIMER == wakeup_reason) {
+        xEventGroupSetBits(boot_groups, set_bit_button(0)); 
+    }
+}
+
+
+static void default_sleep_user_Task(void *arg) {
+    uint8_t *sleep_arg = (uint8_t *) arg;
+    for (;;) {
+        if (pdTRUE == xSemaphoreTake(sleep_Semp, portMAX_DELAY)) {
+            if (*sleep_arg == 1) {
+                esp_sleep_pd_config(
+                    ESP_PD_DOMAIN_MAX,
+                    ESP_PD_OPTION_AUTO);   
+                esp_sleep_disable_wakeup_source(
+                    ESP_SLEEP_WAKEUP_ALL); 
+                const uint64_t ext_wakeup_pin_1_mask = 1ULL << ext_wakeup_pin_1;
+                const uint64_t ext_wakeup_pin_3_mask = 1ULL << ext_wakeup_pin_3;
+                ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(
+                    ext_wakeup_pin_1_mask | ext_wakeup_pin_3_mask,
+                    ESP_EXT1_WAKEUP_ANY_LOW)); 
+                ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
+                ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
+                esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+                //axp_basic_sleep_start(); 
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_deep_sleep_start();  
+            }
+        }
+    }
+}
+
+
+std::string getDateString(int offsetDays = 0) {
+    using namespace std::chrono;
+    auto today = system_clock::now() + hours(24 * offsetDays);
+    std::time_t tt = system_clock::to_time_t(today);
+    std::tm tm = *std::localtime(&tt);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d");
+    return oss.str();
+}
+
+// Connect to Wi-Fi
+void wifi_init_sta(void) {
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        &wifi_event_handler, NULL, NULL);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold = {
+                .authmode = WIFI_AUTH_WPA2_PSK,
+            },
+        },
+    };
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_start();
+
+    ESP_LOGI(TAG, "wifi_init_sta finished.");
+}
+
+void initialize_sntp(void) {
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+}
+
+
+esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA:
+            if (esp_http_client_is_chunked_response(evt->client)) {
+                // Allocate buffer if not already done
+                if (output_buffer == NULL) {
+                    output_buffer = (char*)malloc(MAX_HTTP_OUTPUT_BUFFER);
+                    output_len = 0;
+                }
+                // Copy chunk into buffer
+                if (evt->data_len + output_len < MAX_HTTP_OUTPUT_BUFFER) {
+                    memcpy(output_buffer + output_len, evt->data, evt->data_len);
+                    output_len += evt->data_len;
+                }
+            } else {
+                printf("%.*s", evt->data_len, (char*)evt->data);
+            
+            }
+            break;
+
+        case HTTP_EVENT_ON_FINISH:
+            if (output_buffer != NULL) {
+                output_buffer[output_len] = '\0';  // Null-terminate
+                
+                if(root != NULL){
+                    cJSON_Delete(root);
+                    root = NULL;
+                }
+
+                // Parse JSON
+                root = cJSON_Parse(output_buffer);
+                if (root == NULL) {
+                    printf("JSON Parse Error!\n");
+                }
+
+                free(output_buffer);
+                output_buffer = NULL;
+                output_len = 0;
+            }
+            break;
+
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
+// Download file from URL
+void DownloadJSON(std::string url){
+  
+    root = NULL;
+    printf("Downloading %s\n",url.c_str());
+    
+    esp_http_client_config_t config = {
+        .url = url.c_str(),
+        .event_handler = _http_event_handler,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .buffer_size = 1024*1024,
+        .crt_bundle_attach = esp_crt_bundle_attach,        
+        
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        
+        int status = esp_http_client_get_status_code(client);
+        int length = esp_http_client_get_content_length(client);
+        ESP_LOGI(TAG, "HTTP GET Status = %d, Response Length = %d",
+                 status, length);
+
+
+    } else {
+        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+}
+
+void DownloadAbfall(void) {
+    
+    
+    std::string fromDate = getDateString(-1);
+    std::string toDate   = getDateString(3);
+
+    std::string url = "https://aht1gh-api.sqronline.de/api/modules/abfall/webshow?"\
+                    "module_division_uuid=fde08d95-111b-11ef-bbd4-b2fd53c2005a"\
+                    "&cityIds=" + selectedCityId +
+                    "&areaIds=" + selectedAreaId +
+                    "&fromDate=" + fromDate +
+                    "&toDate=" + toDate;
+    
+    DownloadJSON(url);
+}
+
+void ClearImage(void){
+    Imagesize       = ((EXAMPLE_LCD_WIDTH % 2 == 0) ? (EXAMPLE_LCD_WIDTH / 2) : (EXAMPLE_LCD_WIDTH / 2 + 1)) * EXAMPLE_LCD_HEIGHT;
+    epd_blackImage  = (uint8_t *) heap_caps_malloc(Imagesize * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
+    assert(epd_blackImage);
+
+    Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 0, EPD_7IN3E_WHITE);
+    Paint_SetScale(6);
+    Paint_SetRotate(90);
+    Paint_SelectImage(epd_blackImage); 
+    Paint_Clear(EPD_7IN3E_WHITE);   
+}
+
+int GetClosestColor(char* hex){
+
+    int r, g, b;
+    // Skip '#' and read two hex digits at a time
+    sscanf(hex + 1, "%2x%2x%2x", &r, &g, &b);
+
+    if(r < 127){
+        if(g < 127){
+            if(b < 127){
+                return EPD_7IN3E_BLACK;
+            } else {
+                return EPD_7IN3E_BLUE;
+            }
+        } else {
+            if(b < 127){
+                return EPD_7IN3E_GREEN;
+            } else {
+                if(b > g){
+                    return EPD_7IN3E_BLUE;
+                } else {
+                    return EPD_7IN3E_GREEN;
+                }
+            }
+        }
+    } else {
+        if(g < 127){
+            if(b < 127){
+                return EPD_7IN3E_RED;
+            } else {
+                if(b > r){
+                    return EPD_7IN3E_BLUE;
+                } else {
+                    return EPD_7IN3E_RED;
+                }
+            }
+        } else {
+            if(b < 127){
+                return EPD_7IN3E_YELLOW;
+            } else {
+                return EPD_7IN3E_WHITE;
+            }
+        }
+    }
+}
+
+
+void DrawAbfall(void){
+
+    
+    //Paint_DrawString_CN(82, 34, json_data->td_weather, &Font14CN, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
+    //Paint_DrawString_EN(10, 10, test.c_str(), &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
+
+
+
+    if(root != NULL){
+        // Example: extract a field
+
+        cJSON* mdiv = cJSON_GetObjectItem(root, "mdiv");
+        cJSON* config = cJSON_GetObjectItem(mdiv, "config");
+        cJSON* abfall_types = cJSON_GetObjectItem(config, "abfall_types");
+
+            
+
+        cJSON *entries = cJSON_GetObjectItem(root, "abfall_dates");
+        cJSON *entry = NULL;
+
+        uint16_t y = 10 - 30;
+        char* lastDate = 0;
+        int xOffset = 0;
+
+        cJSON_ArrayForEach(entry, entries) {
+
+            char* rawdate = cJSON_GetObjectItem(entry, "date")->valuestring;
+            char date[11];
+            sprintf(date, "%.2s.%.2s.%.4s", rawdate + 8, rawdate + 5, rawdate);
+            
+
+            int type = cJSON_GetObjectItem(entry, "abfall_type_id")->valueint;
+            cJSON* normal = cJSON_GetObjectItem(abfall_types, "normal");
+            cJSON* special = cJSON_GetObjectItem(abfall_types, "special");
+
+            char* name = NULL;
+            char* color = NULL;
+            cJSON* abfall_type = NULL;
+            cJSON_ArrayForEach(abfall_type, normal) {
+                
+                char* id = cJSON_GetObjectItem(abfall_type, "id")->valuestring;
+                if(type == std::atoi(id)){
+                    name = cJSON_GetObjectItem(abfall_type, "name")->valuestring;
+                    color = cJSON_GetObjectItem(abfall_type, "color")->valuestring;
+                }
+            
+            }
+
+            cJSON_ArrayForEach(abfall_type, special) {
+
+                char* id = cJSON_GetObjectItem(abfall_type, "id")->valuestring;
+                if(type == std::atoi(id)){
+                    name = cJSON_GetObjectItem(abfall_type, "name")->valuestring;
+                    color = cJSON_GetObjectItem(abfall_type, "color")->valuestring;
+                }
+
+            }
+
+            printf("Date: %s, %s\n", date, name);
+    
+            
+            if(name != NULL){
+
+                int bgColor = GetClosestColor(color);
+                int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
+                
+                if(lastDate == NULL || strcmp(lastDate, date) != 0){
+                    lastDate = date;
+                    y+=30;
+                    Paint_DrawString_EN(10, y, date, &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                    xOffset = 0;
+                    
+                }
+                
+                name[1] = 0;
+                Paint_DrawString_EN(230+xOffset, y, name, &Font24, bgColor, fgColor);
+                xOffset+= 30;
+                //Paint_DrawString_EN(10+24*10, y, name, &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                
+            }
+        }
+    }
+
+    
+               
+}
+
+
+std::string generateSymmetricalString(float center, float step, int num_values, bool inner) {
+    std::ostringstream result;
+    
+    // Generate values from center - step*n to center + step*n
+    std::vector<float> numbers;
+
+    if(inner){
+    for (int i = -num_values; i <= num_values; ++i) {
+        for (int j = -num_values; j <= num_values; ++j) {
+            numbers.push_back(center + i * step);
+        }
+    }
+    } else {
+        for (int i = -num_values; i <= num_values; ++i) {
+            for (int j = -num_values; j <= num_values; ++j) {
+                numbers.push_back(center + j * step);
+            }
+        }  
+    }
+
+    // Add the numbers to the result stream with comma separation
+    for (size_t i = 0; i < numbers.size(); ++i) {
+        result << std::fixed << std::setprecision(2) << numbers[i]; // Optional: controlling precision
+        if (i != numbers.size() - 1) {
+            result << ",";  // Add comma separator except after the last element
+        }
+    }
+
+    return result.str();
+}
+
+void DownloadWeather(float xOffset, float yOffset){
+
+    std::string lats = generateSymmetricalString(lat+xOffset*0.05f, 0.01f, 2, false);
+    std::string lons = generateSymmetricalString(lon+yOffset*0.05f, 0.01f, 2, true);
+
+    DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&current=precipitation,rain,showers,temperature_2m", lats, lons));
+    
+}
+
+void DrawWeather(float xOffset, float yOffset) {
+
+    if(root != NULL){
+        
+        int x = 250+xOffset;
+        int y = 250+yOffset;
+        int row = 4;
+        cJSON* entry = NULL;
+        cJSON_ArrayForEach(entry, root){
+            cJSON* current = cJSON_GetObjectItem(entry, "current");
+            if(current){
+                double temp = cJSON_GetObjectItem(current, "temperature_2m")->valuedouble;
+                printf("current temp: %.1f°C\n", temp);
+                if(temp < 0) Paint_SetPixel(x, y, EPD_7IN3E_BLUE);
+                else if(temp < 1) Paint_SetPixel(x, y, EPD_7IN3E_GREEN);
+                else if(temp < 2) Paint_SetPixel(x, y, EPD_7IN3E_YELLOW);
+                else if(temp < 3) Paint_SetPixel(x, y, EPD_7IN3E_RED);
+                else Paint_SetPixel(x, y, EPD_7IN3E_BLACK);
+                x++;
+                row--;
+                if(row < 0 ){
+                    row = 5;
+                    y++;
+                    x-=5;
+                }
+                
+            }
+        }
+    }
+}
+
+
+
+
+void mainRoutine(void){
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    wifi_init_sta();
+
+    // Wait for Wi-Fi connection
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+
+    initialize_sntp();
+    // // Download file
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    ClearImage();
+    DownloadAbfall();
+    DrawAbfall();
+
+    for (int x = -5; x <= 5; x++) {
+        for (int y = -5; y <= 5; y++) {
+        
+            //DownloadWeather(x*5, y*5);
+            //DrawWeather(x*5, y*5);
+            //vTaskDelay(5000 / portTICK_PERIOD_MS);
+
+        }
+    }
+
+    DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
+
+    epaper_port_display(epd_blackImage); 
+}
+
+static void pwr_button_user_Task(void *arg) {
+    for (;;) {
+        EventBits_t even = xEventGroupWaitBits(pwr_groups, set_bit_all, pdTRUE,
+                                               pdFALSE, pdMS_TO_TICKS(2000));
+        if (get_bit_button(even, 0)) // Immediately enter low-power mode
+        {
+            esp_sleep_pd_config(ESP_PD_DOMAIN_MAX, ESP_PD_OPTION_AUTO);
+            esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);     
+            const uint64_t ext_wakeup_pin_1_mask = 1ULL << ext_wakeup_pin_1;
+            const uint64_t ext_wakeup_pin_3_mask = 1ULL << ext_wakeup_pin_3;
+            ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(ext_wakeup_pin_1_mask | ext_wakeup_pin_3_mask, ESP_EXT1_WAKEUP_ANY_LOW)); 
+            ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
+            ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
+            esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+            //axp_basic_sleep_start();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_deep_sleep_start(); 
+        }
+    }
+}
+
+static void boot_button_user_Task(void *arg) {
+    
+    ClearImage();
+    uint8_t *wakeup_arg = (uint8_t *) arg;
+    for (;;) {
+        EventBits_t even = xEventGroupWaitBits(boot_groups, set_bit_all, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
+        if (get_bit_button(even, 0)) {
+            if (*wakeup_arg == 0) {
+                if (pdTRUE == xSemaphoreTake(epaper_gui_semapHandle, 2000)) {                       
+                    xEventGroupSetBits(Green_led_Mode_queue, set_bit_button(6));
+                    Green_led_arg                   = 1;
+                    mainRoutine();
+                    epaper_port_display(epd_blackImage);    
+                    xSemaphoreGive(epaper_gui_semapHandle); 
+                    Green_led_arg = 0;
+                    xSemaphoreGive(sleep_Semp); 
+                    Basic_sleep_arg = 1;
+                }
+            }
+        }
+    }
+}
+
+void User_Martin_mode_app_init(void) {
+    //Initialize NVS
+    sleep_Semp  = xSemaphoreCreateBinary();
+    xTaskCreate(boot_button_user_Task, "boot_button_user_Task", 6 * 1024, &wakeup_basic_flag, 3, NULL);
+    xTaskCreate(pwr_button_user_Task, "pwr_button_user_Task", 4 * 1024, NULL, 3, NULL);
+    xTaskCreate(default_sleep_user_Task, "default_sleep_user_Task", 4 * 1024, &Basic_sleep_arg, 3, NULL); 
+    get_wakeup_gpio();
+    return;
+    
+     
+}
+// void PrintAllData(const char *partition){
+//     esp_err_t ret = nvs_flash_init();
+//     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+//         ESP_ERROR_CHECK(nvs_flash_erase());
+//         ESP_ERROR_CHECK(nvs_flash_init());
+//     }
+
+//     nvs_iterator_t it;
+//     esp_err_t res = nvs_entry_find(partition, NULL, NVS_TYPE_ANY, &it);
+
+//     while (res == ESP_OK) {
+//         nvs_entry_info_t info;
+//         nvs_entry_info(it, &info);
+//         ESP_LOGI(TAG, "Key: %s, Type: %d", info.key, info.type);
+        
+//         // Open the namespace to read the value
+//         nvs_handle_t handle;
+//         if (nvs_open(info.namespace_name, NVS_READONLY, &handle) == ESP_OK) {
+         
+//             switch (info.type) {
+//                 case NVS_TYPE_I32: {
+//                     int32_t val;
+//                     if (nvs_get_i32(handle, info.key, &val) == ESP_OK) {
+//                         ESP_LOGI(TAG, "  Value (int32): %d", val);
+//                     }
+//                     break;
+//                 }
+//                 case NVS_TYPE_STR: {
+//                     size_t required_size;
+//                     if (nvs_get_str(handle, info.key, NULL, &required_size) == ESP_OK) {
+//                         char *buf = static_cast<char*>(malloc(required_size));
+//                         if (nvs_get_str(handle, info.key, buf, &required_size) == ESP_OK) {
+//                             ESP_LOGI(TAG, "  Value (string): %s", buf);
+//                         }
+//                         free(buf);
+//                     }
+//                     break;
+//                 }
+//                 case NVS_TYPE_BLOB: {
+//                     size_t blob_size;
+//                     if (nvs_get_blob(handle, info.key, NULL, &blob_size) == ESP_OK) {
+//                         uint8_t *blob = static_cast<uint8_t*>(malloc(blob_size));
+//                         if (nvs_get_blob(handle, info.key, blob, &blob_size) == ESP_OK) {
+//                             ESP_LOGI(TAG, "  Value (blob, %d bytes)", blob_size);
+//                             // You can hex‑dump blob here if needed
+//                         }
+//                         free(blob);
+//                     }
+//                     break;
+//                 }
+//                 default:
+//                     ESP_LOGI(TAG, "  Value type not handled yet");
+//                     break;
+//             }
+//             nvs_close(handle);
+//         }
+
+//         res = nvs_entry_next(&it);
+//     }
+
+//     nvs_release_iterator(it);
+// }

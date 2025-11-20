@@ -56,8 +56,9 @@ extern "C" void app_main(void) {
     if (read_value == 0x03) {
         printf("Enter xiaozhi mode\n");
         //Launch the application
-        auto &app = Application::GetInstance();
-        app.Start();
+        //auto &app = Application::GetInstance();
+        //app.Start();
+        User_Martin_mode_app_init();
     } else if (read_value == 0x01) {
         printf("Enter Basic mode\n");
         User_Basic_mode_app_init();
