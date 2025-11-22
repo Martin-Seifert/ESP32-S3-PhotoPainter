@@ -28,6 +28,7 @@
 #include "esp_sleep.h"
 #include "button_bsp.h"
 #include "driver/rtc_io.h"
+#include "calendar.h"
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
 #define ext_wakeup_pin_2 GPIO_NUM_5 
@@ -110,7 +111,10 @@ static void default_sleep_user_Task(void *arg) {
                 ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
                 esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
                 //axp_basic_sleep_start(); 
+                ESP_LOGI(TAG, "Starting deep sleep (sleep task)");
                 vTaskDelay(pdMS_TO_TICKS(500));
+                
+    
                 esp_deep_sleep_start();  
             }
         }
@@ -160,10 +164,21 @@ void wifi_init_sta(void) {
     ESP_LOGI(TAG, "wifi_init_sta finished.");
 }
 
+
+bool time_synced;
+void time_sync_callback(struct timeval *tv) {
+    time_synced = true;  // Set the flag to true once the time is synchronized
+}
+
 void initialize_sntp(void) {
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_init();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(time_sync_callback);
+    esp_sntp_init();
+
+    while (!time_synced) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // Sleep for 100ms before checking again
+    }
 }
 
 
@@ -249,7 +264,7 @@ void DownloadJSON(std::string url){
 void DownloadAbfall(void) {
     
     
-    std::string fromDate = getDateString(-1);
+    std::string fromDate = getDateString(-30);
     std::string toDate   = getDateString(3);
 
     std::string url = "https://aht1gh-api.sqronline.de/api/modules/abfall/webshow?"\
@@ -269,16 +284,16 @@ void ClearImage(void){
 
     Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 0, EPD_7IN3E_WHITE);
     Paint_SetScale(6);
-    Paint_SetRotate(90);
+    Paint_SetRotate(270);
     Paint_SelectImage(epd_blackImage); 
     Paint_Clear(EPD_7IN3E_WHITE);   
 }
 
-int GetClosestColor(char* hex){
+int GetClosestColor(std::string hex){
 
     int r, g, b;
     // Skip '#' and read two hex digits at a time
-    sscanf(hex + 1, "%2x%2x%2x", &r, &g, &b);
+    sscanf(hex.c_str(), "%2x%2x%2x", &r, &g, &b);
 
     if(r < 127){
         if(g < 127){
@@ -320,22 +335,15 @@ int GetClosestColor(char* hex){
 }
 
 
-void DrawAbfall(void){
-
-    
-    //Paint_DrawString_CN(82, 34, json_data->td_weather, &Font14CN, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
-    //Paint_DrawString_EN(10, 10, test.c_str(), &Font24, EPD_7IN3E_BLACK, EPD_7IN3E_WHITE);
-
-
+void DrawAbfall(EventCalendar* calendar){
 
     if(root != NULL){
-        // Example: extract a field
-
+       
+        ESP_LOGI(TAG, "Processing abfall data");
+        
         cJSON* mdiv = cJSON_GetObjectItem(root, "mdiv");
         cJSON* config = cJSON_GetObjectItem(mdiv, "config");
         cJSON* abfall_types = cJSON_GetObjectItem(config, "abfall_types");
-
-            
 
         cJSON *entries = cJSON_GetObjectItem(root, "abfall_dates");
         cJSON *entry = NULL;
@@ -343,64 +351,82 @@ void DrawAbfall(void){
         uint16_t y = 10 - 30;
         char* lastDate = 0;
         int xOffset = 0;
+        std::map dates = std::map<std::string,std::string>();
 
         cJSON_ArrayForEach(entry, entries) {
 
-            char* rawdate = cJSON_GetObjectItem(entry, "date")->valuestring;
-            char date[11];
-            sprintf(date, "%.2s.%.2s.%.4s", rawdate + 8, rawdate + 5, rawdate);
+            std::string date (cJSON_GetObjectItem(entry, "date")->valuestring);
+            //char date[11];
+            //sprintf(date, "%.2s.%.2s.%.4s", rawdate + 8, rawdate + 5, rawdate);
             
 
             int type = cJSON_GetObjectItem(entry, "abfall_type_id")->valueint;
             cJSON* normal = cJSON_GetObjectItem(abfall_types, "normal");
             cJSON* special = cJSON_GetObjectItem(abfall_types, "special");
 
-            char* name = NULL;
-            char* color = NULL;
+            std::string name;
+            std::string color;
             cJSON* abfall_type = NULL;
             cJSON_ArrayForEach(abfall_type, normal) {
                 
                 char* id = cJSON_GetObjectItem(abfall_type, "id")->valuestring;
                 if(type == std::atoi(id)){
-                    name = cJSON_GetObjectItem(abfall_type, "name")->valuestring;
-                    color = cJSON_GetObjectItem(abfall_type, "color")->valuestring;
+                    name = std::string(cJSON_GetObjectItem(abfall_type, "name")->valuestring);
+                    color = std::string(cJSON_GetObjectItem(abfall_type, "color")->valuestring);
                 }
-            
+        
             }
 
             cJSON_ArrayForEach(abfall_type, special) {
 
                 char* id = cJSON_GetObjectItem(abfall_type, "id")->valuestring;
                 if(type == std::atoi(id)){
-                    name = cJSON_GetObjectItem(abfall_type, "name")->valuestring;
-                    color = cJSON_GetObjectItem(abfall_type, "color")->valuestring;
+                    name = std::string(cJSON_GetObjectItem(abfall_type, "name")->valuestring);
+                    color = std::string(cJSON_GetObjectItem(abfall_type, "color")->valuestring);
                 }
 
             }
 
-            printf("Date: %s, %s\n", date, name);
-    
+            std::cout << date << " " << name << std::endl;
             
-            if(name != NULL){
+            
+            if(!name.empty()){
 
-                int bgColor = GetClosestColor(color);
-                int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
+
                 
-                if(lastDate == NULL || strcmp(lastDate, date) != 0){
-                    lastDate = date;
-                    y+=30;
-                    Paint_DrawString_EN(10, y, date, &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-                    xOffset = 0;
+                //int bgColor = GetClosestColor(color);
+                //int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
+                
+                
+                dates[date] += color + name.substr(0,3);
+                // if(lastDate == NULL || strcmp(lastDate, date) != 0){
+                //     lastDate = date;
+                //     y+=30;
+                //     Paint_DrawString_EN(10, y, date, &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                //     xOffset = 0;
                     
-                }
+                // }
                 
-                name[1] = 0;
-                Paint_DrawString_EN(230+xOffset, y, name, &Font24, bgColor, fgColor);
-                xOffset+= 30;
-                //Paint_DrawString_EN(10+24*10, y, name, &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                // name[1] = 0;
+                // Paint_DrawString_EN(230+xOffset, y, name, &Font24, bgColor, fgColor);
+                // xOffset+= 30;
                 
             }
         }
+
+        for (const auto& pair : dates) {
+            
+            Date date;
+            date.FromYYYY_MM_DD(pair.first);
+            calendar->addEvent(date, pair.second);
+            // pair.first is the key
+            // pair.second is the value
+        }
+        
+    } else {
+
+        ESP_LOGI(TAG, "Received no abfall data");
+        
     }
 
     
@@ -479,7 +505,46 @@ void DrawWeather(float xOffset, float yOffset) {
     }
 }
 
+void DrawCalendar(EventCalendar* calendar){
 
+    std::map<Date, std::string> dates = calendar->getNext7Days();
+
+    int y = 10;
+    for (const auto& pair : dates) {
+         
+        int x = 10;
+        Date date = pair.first;
+        std::string datestr = date.ToDD_MM();
+        Paint_DrawString_EN(x, y, datestr.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+        x+= datestr.length() * 17 + 10;
+
+        std::vector<std::string> result;
+        std::stringstream ss(pair.second);
+        std::string token;
+
+        // Split by '#'
+        while (std::getline(ss, token, '#')) {
+            if(!token.empty()){
+                result.push_back(token);
+            }
+        }
+        for (const auto& word : result) {
+
+            std::string color = word.substr(0,6);
+            std::string text = word.substr(6);
+            
+            int bgColor = GetClosestColor(color);
+            int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
+                
+            std::string l1text = utf8_to_latin1(text);
+            Paint_DrawString_EN(x, y, l1text.c_str(), &Font24, bgColor, fgColor);
+            x+= l1text.length() * 17 + 10;
+
+        }
+        y+= 30;
+    }
+
+}
 
 
 void mainRoutine(void){
@@ -491,16 +556,23 @@ void mainRoutine(void){
 
     wifi_init_sta();
 
+    auto calendar = new EventCalendar();
+
     // Wait for Wi-Fi connection
     vTaskDelay(5000 / portTICK_PERIOD_MS);
 
     initialize_sntp();
     // // Download file
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    ESP_LOGI(TAG, "Set time to:");
+    auto now = std::chrono::system_clock::now();
+    std::time_t end_time = std::chrono::system_clock::to_time_t(now);
+    std::cout << std::ctime(&end_time) << std::endl;
+     
 
     ClearImage();
     DownloadAbfall();
-    DrawAbfall();
+    DrawAbfall(calendar);
 
     for (int x = -5; x <= 5; x++) {
         for (int y = -5; y <= 5; y++) {
@@ -513,8 +585,24 @@ void mainRoutine(void){
     }
 
     DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
+    
+    if(root != NULL){
+        cJSON* entry;
+        cJSON_ArrayForEach(entry, root) {
+            
+            std::string name(entry->string);
+            std::string datestr(cJSON_GetObjectItem(entry, "datum")->valuestring);
+            Date date;
+            date.FromYYYY_MM_DD(datestr);
+            calendar->addEvent(date, "#ffffff" + name);
+        }
+    }
 
+    DrawCalendar(calendar);
+
+    ESP_LOGI(TAG, "Start painting");
     epaper_port_display(epd_blackImage); 
+    
 }
 
 static void pwr_button_user_Task(void *arg) {
@@ -533,6 +621,9 @@ static void pwr_button_user_Task(void *arg) {
             esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
             //axp_basic_sleep_start();
             vTaskDelay(pdMS_TO_TICKS(500));
+            
+            ESP_LOGI(TAG, "Starting deep sleep (power button)");
+                
             esp_deep_sleep_start(); 
         }
     }
@@ -550,7 +641,6 @@ static void boot_button_user_Task(void *arg) {
                     xEventGroupSetBits(Green_led_Mode_queue, set_bit_button(6));
                     Green_led_arg                   = 1;
                     mainRoutine();
-                    epaper_port_display(epd_blackImage);    
                     xSemaphoreGive(epaper_gui_semapHandle); 
                     Green_led_arg = 0;
                     xSemaphoreGive(sleep_Semp); 
@@ -562,6 +652,9 @@ static void boot_button_user_Task(void *arg) {
 }
 
 void User_Martin_mode_app_init(void) {
+    
+    ESP_LOGI(TAG, "Entering Martin mode");
+    
     //Initialize NVS
     sleep_Semp  = xSemaphoreCreateBinary();
     xTaskCreate(boot_button_user_Task, "boot_button_user_Task", 6 * 1024, &wakeup_basic_flag, 3, NULL);

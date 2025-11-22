@@ -1,7 +1,7 @@
 #ifndef USER_APP_H
 #define USER_APP_H
 #include "freertos/FreeRTOS.h"
-
+#include <string>
 
 uint8_t User_Mode_init(void);       // main.cc
 
@@ -37,5 +37,7 @@ void User_Basic_mode_app_init(void);
 void User_Network_mode_app_init(void);
 
 void Mode_Selection_Init(void);
+
+std::string utf8_to_latin1(const std::string& utf8_str);
 
 #endif

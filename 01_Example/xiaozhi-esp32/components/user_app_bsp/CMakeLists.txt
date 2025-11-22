@@ -6,6 +6,7 @@ idf_component_register(
   "mode_src/Mode_Selection.cpp"
   "mode_src/martin_mode.cpp"
   "mode_src/calendar.cpp"
+  "mode_src/encoding.cpp"
   "user_app.cpp" 
   PRIV_REQUIRES 
   driver 
