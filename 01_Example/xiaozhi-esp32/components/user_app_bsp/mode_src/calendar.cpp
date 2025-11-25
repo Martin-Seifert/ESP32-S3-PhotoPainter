@@ -17,19 +17,19 @@ Date fromTimePoint(const std::chrono::system_clock::time_point& tp) {
     return { tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday };
 }
 
-std::map<Date, std::string> EventCalendar::getNext7Days() {
+std::map<Date, std::string> EventCalendar::getNextDays(int days) {
     std::map<Date, std::string> result;
 
     auto now = std::chrono::system_clock::now();
     Date today = fromTimePoint(now);
     
-    auto week_later_tp = now + std::chrono::hours(24 * 7);
+    auto week_later_tp = now + std::chrono::hours(24 * days);
     Date week_later = fromTimePoint(week_later_tp);
 
     for (const auto& [date, desc] : events) {
          std::cout << date.day << today.day << week_later.day << std::endl;
             
-        if (true || (date >= today && date <= week_later)) {
+        if ((date >= today && date <= week_later)) {
            result[date] = desc;
         }
     }

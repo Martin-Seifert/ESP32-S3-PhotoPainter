@@ -89,7 +89,7 @@ public:
     }
 
     // Get all events in the next 7 days
-    std::map<Date, std::string> getNext7Days();
+    std::map<Date, std::string> getNextDays(int days);
     
     // Print all events (for testing)
     void printEvents(const std::map<Date, std::string>& evts) {

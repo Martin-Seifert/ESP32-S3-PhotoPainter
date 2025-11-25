@@ -20,6 +20,7 @@ void User_xiaozhi_app_init(void); // init
 void xiaozhi_init_received(const char *arg1);
 void xiaozhi_ai_Message(const char *arg1, const char *arg2);
 void xiaozhi_application_received(const char *str);
+char* Get_TemperatureHumidity(void);
 extern int sdcard_bmp_Quantity;
 extern int sdcard_doc_count; 
 extern int is_ai_img;        

@@ -29,6 +29,7 @@
 #include "button_bsp.h"
 #include "driver/rtc_io.h"
 #include "calendar.h"
+#include "board.h"
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
 #define ext_wakeup_pin_2 GPIO_NUM_5 
@@ -39,7 +40,7 @@
 static char *output_buffer;  // Buffer to store response
 static int output_len;       // Current length of data
 
-static const char *TAG = "wifi_http";
+static const char *TAG = "MartinMode";
 
 static uint8_t *epd_blackImage = NULL; 
 static uint32_t Imagesize;             
@@ -264,8 +265,8 @@ void DownloadJSON(std::string url){
 void DownloadAbfall(void) {
     
     
-    std::string fromDate = getDateString(-30);
-    std::string toDate   = getDateString(3);
+    std::string fromDate = getDateString(0);
+    std::string toDate   = getDateString(30);
 
     std::string url = "https://aht1gh-api.sqronline.de/api/modules/abfall/webshow?"\
                     "module_division_uuid=fde08d95-111b-11ef-bbd4-b2fd53c2005a"\
@@ -282,9 +283,8 @@ void ClearImage(void){
     epd_blackImage  = (uint8_t *) heap_caps_malloc(Imagesize * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     assert(epd_blackImage);
 
-    Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 0, EPD_7IN3E_WHITE);
+    Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 270, EPD_7IN3E_WHITE);
     Paint_SetScale(6);
-    Paint_SetRotate(270);
     Paint_SelectImage(epd_blackImage); 
     Paint_Clear(EPD_7IN3E_WHITE);   
 }
@@ -387,6 +387,8 @@ void DrawAbfall(EventCalendar* calendar){
 
             }
 
+            if(name.find("Wertstoffhof") == 0) continue;
+            if(name.find("Bio") == 0) continue;
             std::cout << date << " " << name << std::endl;
             
             
@@ -434,43 +436,52 @@ void DrawAbfall(EventCalendar* calendar){
 }
 
 
-std::string generateSymmetricalString(float center, float step, int num_values, bool inner) {
-    std::ostringstream result;
-    
-    // Generate values from center - step*n to center + step*n
-    std::vector<float> numbers;
+static const std::unordered_map<int, std::string> wmoPhenomenonLookup = {
+    {0, "Klarer Himmel"},
+    {1, "Hauptsächlich klar"},
+    {2, "Teilweise bewölkt"},
+    {3, "Bedeckt"},
+    {45, "Nebel"},
+    {48, "Reifnebel"},
+    {51, "Leichter Nieselregen"},
+    {53, "Mäßiger Nieselregen"},
+    {55, "Dichter Nieselregen"},
+    {56, "Gefrier-Nieselregen"},
+    {57, "Gefrier-Nieselregen+"},
+    {61, "Leichter Regen"},
+    {63, "Mäßiger Regen"},
+    {65, "Starker Regen"},
+    {66, "Leichter Gefrieregen"},
+    {67, "Starker Gefrierregen"},
+    {71, "Leichter Schneefall"},
+    {73, "Mäßiger Schneefall"},
+    {75, "Starker Schneefall"},
+    {77, "Schneekörner"},
+    {80, "Leichte Regenschauer"},
+    {81, "Mäßige Regenschauer"},
+    {82, "Starke Regenschauer"},
+    {85, "Leichter Schneeregen"},
+    {86, "Starker Schneeregen"},
+    {95, "Gewitter"},
+    {96, "Leichter Hagel"},
+    {99, "Starker Hagel"}
+};
 
-    if(inner){
-    for (int i = -num_values; i <= num_values; ++i) {
-        for (int j = -num_values; j <= num_values; ++j) {
-            numbers.push_back(center + i * step);
-        }
-    }
+std::string WMOLookup(int code){
+
+    if (wmoPhenomenonLookup.find(code) != wmoPhenomenonLookup.end()) {
+        return wmoPhenomenonLookup.at(code);
     } else {
-        for (int i = -num_values; i <= num_values; ++i) {
-            for (int j = -num_values; j <= num_values; ++j) {
-                numbers.push_back(center + j * step);
-            }
-        }  
+        return "Unbekannt";
     }
 
-    // Add the numbers to the result stream with comma separation
-    for (size_t i = 0; i < numbers.size(); ++i) {
-        result << std::fixed << std::setprecision(2) << numbers[i]; // Optional: controlling precision
-        if (i != numbers.size() - 1) {
-            result << ",";  // Add comma separator except after the last element
-        }
-    }
 
-    return result.str();
 }
 
-void DownloadWeather(float xOffset, float yOffset){
 
-    std::string lats = generateSymmetricalString(lat+xOffset*0.05f, 0.01f, 2, false);
-    std::string lons = generateSymmetricalString(lon+yOffset*0.05f, 0.01f, 2, true);
+void DownloadWeather(){
 
-    DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&current=precipitation,rain,showers,temperature_2m", lats, lons));
+    DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&hourly=precipitation,rain,showers,temperature_2m,relative_humidity_2m,weather_code&timezone=auto&forecast_days=2", lat, lon));
     
 }
 
@@ -478,45 +489,93 @@ void DrawWeather(float xOffset, float yOffset) {
 
     if(root != NULL){
         
-        int x = 250+xOffset;
-        int y = 250+yOffset;
-        int row = 4;
-        cJSON* entry = NULL;
-        cJSON_ArrayForEach(entry, root){
-            cJSON* current = cJSON_GetObjectItem(entry, "current");
-            if(current){
-                double temp = cJSON_GetObjectItem(current, "temperature_2m")->valuedouble;
-                printf("current temp: %.1f°C\n", temp);
-                if(temp < 0) Paint_SetPixel(x, y, EPD_7IN3E_BLUE);
-                else if(temp < 1) Paint_SetPixel(x, y, EPD_7IN3E_GREEN);
-                else if(temp < 2) Paint_SetPixel(x, y, EPD_7IN3E_YELLOW);
-                else if(temp < 3) Paint_SetPixel(x, y, EPD_7IN3E_RED);
-                else Paint_SetPixel(x, y, EPD_7IN3E_BLACK);
-                x++;
-                row--;
-                if(row < 0 ){
-                    row = 5;
-                    y++;
-                    x-=5;
-                }
-                
-            }
+        cJSON* current = cJSON_GetObjectItem(root, "current");
+        if(current){
+            
+            double temp = cJSON_GetObjectItem(current, "temperature_2m")->valuedouble;
+            double humidity = cJSON_GetObjectItem(current, "relative_humidity_2m")->valueint;
+            int code = cJSON_GetObjectItem(current, "weather_code")->valueint;
+
+            std::string str1 = (std::ostringstream() << std::fixed << std::setprecision(0) << temp << "°C " << humidity << "%").str();
+            std::string str2 = (std::ostringstream() << std::fixed << std::setprecision(0) << WMOLookup(code)).str();
+
+            Paint_DrawString_EN(xOffset, yOffset, str1.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+            yOffset +=30;
+            Paint_DrawString_EN(xOffset, yOffset, str2.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+            yOffset +=30;
         }
+
+        cJSON* hourly = cJSON_GetObjectItem(root, "hourly");
+        if(hourly){
+            
+            cJSON* weather_codes = cJSON_GetObjectItem(hourly, "weather_code");
+            cJSON* times = cJSON_GetObjectItem(hourly, "time");
+            cJSON* entry;
+            int lastCode = -1;
+            int idx = 0;
+            Date lastDate;
+            bool first = true;
+            std::string text;
+            cJSON_ArrayForEach(entry, weather_codes){
+                
+                int code = entry->valueint;
+                if(lastCode != code){
+                
+                    std::string datetime = std::string(cJSON_GetArrayItem(times, idx)->valuestring);
+                    std::string datestr = datetime.substr(0, 10);
+                    Date date;
+                    date.FromYYYY_MM_DD(datestr);
+                    
+                    if(yOffset > Paint.Height - 30) return;
+
+                    if(first){
+                        text = "Wetter heute";
+                        Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                        yOffset +=30;
+                        lastDate = date;
+                        first = false;
+                    }
+                    else if(date > lastDate){
+                        text = "Wetter morgen";
+                        Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                        yOffset+=30;
+                        lastDate = date;
+                    }
+                    
+                    
+                    std::string time = datetime.substr(11);
+
+                    text = time + " " + WMOLookup(code);
+                    Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                    yOffset +=30;
+                }
+                lastCode = code;
+                idx++;
+            }
+
+
+
+        }
+        
+
+
     }
 }
 
-void DrawCalendar(EventCalendar* calendar){
+void DrawCalendar(EventCalendar* calendar, int startX, int startY){
 
-    std::map<Date, std::string> dates = calendar->getNext7Days();
+    std::map<Date, std::string> dates = calendar->getNextDays(30);
 
-    int y = 10;
+    sFONT font = Font24;
+    int charWidth = font.Width;
+    int y = startY;
     for (const auto& pair : dates) {
          
-        int x = 10;
+        int x = startX;
         Date date = pair.first;
         std::string datestr = date.ToDD_MM();
         Paint_DrawString_EN(x, y, datestr.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-        x+= datestr.length() * 17 + 10;
+        x+= datestr.length() * charWidth + 10;
 
         std::vector<std::string> result;
         std::stringstream ss(pair.second);
@@ -535,17 +594,34 @@ void DrawCalendar(EventCalendar* calendar){
             
             int bgColor = GetClosestColor(color);
             int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
-                
-            std::string l1text = utf8_to_latin1(text);
+            
+            int maxChars = (Paint.Width - x) / charWidth;
+
+            if(maxChars <= 0) break;
+            std::string l1text = utf8_to_latin1(text).substr(0, maxChars);
             Paint_DrawString_EN(x, y, l1text.c_str(), &Font24, bgColor, fgColor);
-            x+= l1text.length() * 17 + 10;
+            x+= l1text.length() * charWidth + 10;
 
         }
-        y+= 30;
+        y+= font.Height + 6;
     }
 
 }
 
+
+void DrawBattery(){
+    return;
+    auto& board = Board::GetInstance();
+    int battery_level;
+    bool charging, discharging;
+    board.GetBatteryLevel(battery_level, charging, discharging);
+
+    for (int i = 0; i < battery_level; i++)
+    {
+        Paint_SetPixel(i, 0, EPD_7IN3E_GREEN);
+    }
+    
+}
 
 void mainRoutine(void){
     esp_err_t ret = nvs_flash_init();
@@ -574,16 +650,9 @@ void mainRoutine(void){
     DownloadAbfall();
     DrawAbfall(calendar);
 
-    for (int x = -5; x <= 5; x++) {
-        for (int y = -5; y <= 5; y++) {
-        
-            //DownloadWeather(x*5, y*5);
-            //DrawWeather(x*5, y*5);
-            //vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-        }
-    }
-
+    DownloadWeather();
+    DrawWeather(10, 400);
+    
     DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
     
     if(root != NULL){
@@ -598,8 +667,10 @@ void mainRoutine(void){
         }
     }
 
-    DrawCalendar(calendar);
+    DrawCalendar(calendar, 10, 10);
 
+    esp_wifi_stop();
+    DrawBattery();
     ESP_LOGI(TAG, "Start painting");
     epaper_port_display(epd_blackImage); 
     
@@ -631,7 +702,6 @@ static void pwr_button_user_Task(void *arg) {
 
 static void boot_button_user_Task(void *arg) {
     
-    ClearImage();
     uint8_t *wakeup_arg = (uint8_t *) arg;
     for (;;) {
         EventBits_t even = xEventGroupWaitBits(boot_groups, set_bit_all, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
