@@ -49,7 +49,7 @@ static uint8_t *epd_blackImage = NULL;
 static uint32_t Imagesize;             
 
 
-static RTC_DATA_ATTR int basic_rtc_set_time = 60*60;// User sets the wake-up time in seconds. // The default is 60 seconds. It is awakened by a timer.
+static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60*60*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
 
 static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
 static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
@@ -138,7 +138,7 @@ static void get_wakeup_gpio(void) {
         if (wakeup_pins & (1ULL << ext_wakeup_pin_1)) {
             // esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
             // //Disable the previous timer first
-            // esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+            // esp_sleep_enable_timer_wakeup(basic_rtc_set_time);
             // //Reset the 10-second timer
             xEventGroupSetBits(boot_groups, set_bit_button(0)); 
         } else if (wakeup_pins & (1ULL << ext_wakeup_pin_3)) {
@@ -167,7 +167,7 @@ static void default_sleep_user_Task(void *arg) {
                     ESP_EXT1_WAKEUP_ANY_LOW)); 
                 ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
                 ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
-                esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+                esp_sleep_enable_timer_wakeup(basic_rtc_set_time);
                 //axp_basic_sleep_start(); 
                 ESP_LOGI(TAG, "Starting deep sleep (sleep task)");
                 vTaskDelay(pdMS_TO_TICKS(500));
@@ -776,7 +776,7 @@ static void pwr_button_user_Task(void *arg) {
             ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(ext_wakeup_pin_1_mask | ext_wakeup_pin_3_mask, ESP_EXT1_WAKEUP_ANY_LOW)); 
             ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
             ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
-            esp_sleep_enable_timer_wakeup(basic_rtc_set_time * 1000 * 1000);
+            esp_sleep_enable_timer_wakeup(basic_rtc_set_time);
             //axp_basic_sleep_start();
             vTaskDelay(pdMS_TO_TICKS(500));
             
