@@ -30,6 +30,9 @@
 #include "driver/rtc_io.h"
 #include "calendar.h"
 #include "board.h"
+#include <ctime>
+#include "led_bsp.h"
+#include "axp_prot.h"
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
 #define ext_wakeup_pin_2 GPIO_NUM_5 
@@ -46,7 +49,7 @@ static uint8_t *epd_blackImage = NULL;
 static uint32_t Imagesize;             
 
 
-static RTC_DATA_ATTR int basic_rtc_set_time = 60 * 60;// User sets the wake-up time in seconds. // The default is 60 seconds. It is awakened by a timer.
+static RTC_DATA_ATTR int basic_rtc_set_time = 60*60;// User sets the wake-up time in seconds. // The default is 60 seconds. It is awakened by a timer.
 
 static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
 static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
@@ -74,6 +77,60 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
 static void get_wakeup_gpio(void) {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    
+    switch (wakeup_reason) {
+         case ESP_SLEEP_WAKEUP_UNDEFINED:
+            ESP_LOGI("WAKEUP", "In case of deep sleep, reset was not caused by exit from deep sleep");
+            break;
+        case ESP_SLEEP_WAKEUP_ALL:
+            ESP_LOGI("WAKEUP", "Not a wakeup cause, used to disable all wakeup sources with esp_sleep_disable_wakeup_source");
+            break;
+        case ESP_SLEEP_WAKEUP_EXT0:
+            ESP_LOGI("WAKEUP", "Wakeup caused by external signal using RTC_IO");
+            break;
+        case ESP_SLEEP_WAKEUP_EXT1:
+            ESP_LOGI("WAKEUP", "Wakeup caused by external signal using RTC_CNTL");
+            break;
+        case ESP_SLEEP_WAKEUP_TIMER:
+            ESP_LOGI("WAKEUP", "Wakeup caused by timer");
+            break;
+        case ESP_SLEEP_WAKEUP_TOUCHPAD:
+            ESP_LOGI("WAKEUP", "Wakeup caused by touchpad");
+            break;
+        case ESP_SLEEP_WAKEUP_ULP:
+            ESP_LOGI("WAKEUP", "Wakeup caused by ULP program");
+            break;
+        case ESP_SLEEP_WAKEUP_GPIO:
+            ESP_LOGI("WAKEUP", "Wakeup caused by GPIO (light sleep only on ESP32, S2, and S3)");
+            break;
+        case ESP_SLEEP_WAKEUP_UART:
+            ESP_LOGI("WAKEUP", "Wakeup caused by UART (light sleep only)");
+            break;
+        case ESP_SLEEP_WAKEUP_WIFI:
+            ESP_LOGI("WAKEUP", "Wakeup caused by WIFI (light sleep only)");
+            break;
+        case ESP_SLEEP_WAKEUP_COCPU:
+            ESP_LOGI("WAKEUP", "Wakeup caused by COCPU interrupt");
+            break;
+        case ESP_SLEEP_WAKEUP_COCPU_TRAP_TRIG:
+            ESP_LOGI("WAKEUP", "Wakeup caused by COCPU crash");
+            break;
+        case ESP_SLEEP_WAKEUP_BT:
+            ESP_LOGI("WAKEUP", "Wakeup caused by Bluetooth (light sleep only)");
+            break;
+        case ESP_SLEEP_WAKEUP_VAD:
+            ESP_LOGI("WAKEUP", "Wakeup caused by VAD (Voice Activity Detection)");
+            break;
+        case ESP_SLEEP_WAKEUP_VBAT_UNDER_VOLT:
+            ESP_LOGI("WAKEUP", "Wakeup caused by VDD_BAT under voltage");
+            break;
+        default:
+            ESP_LOGI("WAKEUP", "Unknown wakeup cause");
+            break;
+    }
+    
+    
+    
     if (ESP_SLEEP_WAKEUP_EXT1 == wakeup_reason) {
         uint64_t wakeup_pins = esp_sleep_get_ext1_wakeup_status();
         if (wakeup_pins == 0)
@@ -485,6 +542,30 @@ void DownloadWeather(){
     
 }
 
+bool isCurrentTimeHigherThan(const std::string targetTime) {
+    // Get current time
+    time_t now = time(0);
+    struct tm currentTime;
+    localtime_r(&now, &currentTime);
+    
+    // Extract current time in hours and minutes
+    int currentHour = currentTime.tm_hour;
+    int currentMinute = currentTime.tm_min;
+    
+    // Parse the target time (24:00)
+    int targetHour, targetMinute;
+    char colon;
+    std::stringstream(targetTime) >> targetHour >> colon >> targetMinute;
+
+    // Convert both times to minutes for easier comparison
+    int currentTimeInMinutes = currentHour * 60 + currentMinute;
+    int targetTimeInMinutes = targetHour * 60 + targetMinute;
+    
+    std::cout << currentTimeInMinutes << " " << targetTimeInMinutes << std::endl;
+
+    return currentTimeInMinutes > targetTimeInMinutes;
+}
+
 void DrawWeather(float xOffset, float yOffset) {
 
     if(root != NULL){
@@ -516,37 +597,49 @@ void DrawWeather(float xOffset, float yOffset) {
             Date lastDate;
             bool first = true;
             std::string text;
+            
             cJSON_ArrayForEach(entry, weather_codes){
-                
+        
+                std::string datetime = std::string(cJSON_GetArrayItem(times, idx)->valuestring);
+                std::string datestr = datetime.substr(0, 10);
+                std::string timestr = datetime.substr(11);
+                Date date;
+                date.FromYYYY_MM_DD(datestr);
+                std::cout << "timestr: " << timestr << std::endl;
+                if(first && isCurrentTimeHigherThan(timestr)){
+                    idx++;
+                    continue;
+                }
+
                 int code = entry->valueint;
                 if(lastCode != code){
                 
-                    std::string datetime = std::string(cJSON_GetArrayItem(times, idx)->valuestring);
-                    std::string datestr = datetime.substr(0, 10);
-                    Date date;
-                    date.FromYYYY_MM_DD(datestr);
-                    
                     if(yOffset > Paint.Height - 30) return;
 
                     if(first){
                         text = "Wetter heute";
-                        Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                        if(yOffset > Paint.Height - 60) return;
+
+                        Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
                         yOffset +=30;
                         lastDate = date;
                         first = false;
                     }
                     else if(date > lastDate){
                         text = "Wetter morgen";
-                        Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                        if(yOffset > Paint.Height - 60) return;
+
+                        Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
                         yOffset+=30;
                         lastDate = date;
+                        
                     }
                     
                     
                     std::string time = datetime.substr(11);
 
                     text = time + " " + WMOLookup(code);
-                    Paint_DrawString_EN(xOffset, yOffset, text.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
+                    Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
                     yOffset +=30;
                 }
                 lastCode = code;
@@ -610,26 +703,20 @@ void DrawCalendar(EventCalendar* calendar, int startX, int startY){
 
 
 void DrawBattery(){
-    return;
-    auto& board = Board::GetInstance();
-    int battery_level;
-    bool charging, discharging;
-    board.GetBatteryLevel(battery_level, charging, discharging);
-
-    for (int i = 0; i < battery_level; i++)
+    
+    int battery_level = axp2101_getBattPercent();
+    
+    for (int i = 0; i < (int)(((float)battery_level/100.0) * Paint.Width); i++)
     {
         Paint_SetPixel(i, 0, EPD_7IN3E_GREEN);
+        Paint_SetPixel(i, 1, EPD_7IN3E_GREEN);
+        Paint_SetPixel(i, 2, EPD_7IN3E_GREEN);
     }
     
 }
 
 void mainRoutine(void){
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
-
+    
     wifi_init_sta();
 
     auto calendar = new EventCalendar();
@@ -727,6 +814,7 @@ void User_Martin_mode_app_init(void) {
     
     //Initialize NVS
     sleep_Semp  = xSemaphoreCreateBinary();
+    xEventGroupSetBits(Red_led_Mode_queue, set_bit_button(0));
     xTaskCreate(boot_button_user_Task, "boot_button_user_Task", 6 * 1024, &wakeup_basic_flag, 3, NULL);
     xTaskCreate(pwr_button_user_Task, "pwr_button_user_Task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(default_sleep_user_Task, "default_sleep_user_Task", 4 * 1024, &Basic_sleep_arg, 3, NULL); 

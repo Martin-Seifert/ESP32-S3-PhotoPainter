@@ -15,6 +15,65 @@
 #define TAG "main"
 
 extern "C" void app_main(void) {
+
+    sleep(5);
+
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    switch (reset_reason) {
+         case ESP_RST_UNKNOWN:
+            ESP_LOGI("RESET", "Reset reason cannot be determined");
+            break;
+        case ESP_RST_POWERON:
+            ESP_LOGI("RESET", "Reset due to power-on event");
+            break;
+        case ESP_RST_EXT:
+            ESP_LOGI("RESET", "Reset by external pin (not applicable for ESP32)");
+            break;
+        case ESP_RST_SW:
+            ESP_LOGI("RESET", "Software reset via esp_restart");
+            break;
+        case ESP_RST_PANIC:
+            ESP_LOGI("RESET", "Software reset due to exception/panic");
+            break;
+        case ESP_RST_INT_WDT:
+            ESP_LOGI("RESET", "Reset (software or hardware) due to interrupt watchdog");
+            break;
+        case ESP_RST_TASK_WDT:
+            ESP_LOGI("RESET", "Reset due to task watchdog");
+            break;
+        case ESP_RST_WDT:
+            ESP_LOGI("RESET", "Reset due to other watchdogs");
+            break;
+        case ESP_RST_DEEPSLEEP:
+            ESP_LOGI("RESET", "Reset after exiting deep sleep mode");
+            break;
+        case ESP_RST_BROWNOUT:
+            ESP_LOGI("RESET", "Brownout reset (software or hardware)");
+            break;
+        case ESP_RST_SDIO:
+            ESP_LOGI("RESET", "Reset over SDIO");
+            break;
+        case ESP_RST_USB:
+            ESP_LOGI("RESET", "Reset by USB peripheral");
+            break;
+        case ESP_RST_JTAG:
+            ESP_LOGI("RESET", "Reset by JTAG");
+            break;
+        case ESP_RST_EFUSE:
+            ESP_LOGI("RESET", "Reset due to efuse error");
+            break;
+        case ESP_RST_PWR_GLITCH:
+            ESP_LOGI("RESET", "Reset due to power glitch detected");
+            break;
+        case ESP_RST_CPU_LOCKUP:
+            ESP_LOGI("RESET", "Reset due to CPU lock up (double exception)");
+            break;
+        default:
+            ESP_LOGI("RESET", "Unknown reset reason");
+            break;
+    }
+
     // Initialize the default event loop
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
