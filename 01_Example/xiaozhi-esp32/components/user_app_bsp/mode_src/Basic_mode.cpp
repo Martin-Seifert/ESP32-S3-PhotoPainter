@@ -153,7 +153,7 @@ void User_Basic_mode_app_init(void) {
         }
     }
     if(ai_model_data != NULL) {free(ai_model_data);ai_model_data = NULL;}
-    list_scan_dir("/sdcard/06_user_foundation_img");        
+    list_scan_dir("/sdcard/06_USE~1");        
     sdcard_Basic_bmp = list_iterator();
     xTaskCreate(boot_button_user_Task, "boot_button_user_Task", 6 * 1024, &wakeup_basic_flag, 3, NULL);
     xTaskCreate(pwr_button_user_Task, "pwr_button_user_Task", 4 * 1024, NULL, 3, NULL);

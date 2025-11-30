@@ -216,7 +216,7 @@ void list_scan_dir(const char *path) {
         if (entry->d_type == DT_DIR) { 
             ESP_LOGI("sdscan", "Directory: %s", entry->d_name);
         } else {
-            if (strstr(entry->d_name, ".bmp") == NULL) {
+            if (strcasestr(entry->d_name, ".bmp") == NULL) {
                 continue;
             }
             uint16_t       _strlen   = strlen(path) + strlen(entry->d_name) + 1 + 1; 

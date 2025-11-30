@@ -247,7 +247,7 @@ ai_model_t *json_sdcard_txt_aimodel(void) {
     uint8_t *sdcard_buffer = (uint8_t *)malloc(1024);
     assert(sdcard_buffer);
     assert(data);
-    if(sdcard_read_file("/sdcard/06_user_foundation_img/config.txt", sdcard_buffer, NULL) != ESP_OK) {
+    if(sdcard_read_file("/sdcard/06_USE~1/config.txt", sdcard_buffer, NULL) != ESP_OK) {
         free(sdcard_buffer);
         sdcard_buffer = NULL;
         free(data);
