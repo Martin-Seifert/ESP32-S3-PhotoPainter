@@ -1,42 +1,39 @@
-#include <format>
-#include <cstdio>
-#include <unordered_map>
-#include <iostream>
-#include <string>
-#include <sstream>
-#include <vector>
 #include <chrono>
-#include <iomanip>
-#include <string>
-#include <ctime>
 #include <cJSON.h>
+#include <cstdio>
+#include <ctime>
+#include <format>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-#include "esp_log.h"
-#include "esp_system.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "esp_sntp.h"
-#include "esp_sleep.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_sleep.h"
+#include "esp_sntp.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
 
-#include "nvs_flash.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "axp_prot.h"
+#include "button_bsp.h"
+#include "driver/rtc_io.h"
 #include "epaper_port.h"
 #include "GUI_Paint.h"
 #include "led_bsp.h"
-#include "axp_prot.h"
 #include "mbedtls/debug.h"
-#include "button_bsp.h"
-#include "driver/rtc_io.h"
 
 #include "calendar.h"
-#include "user_app.h"
 #include "private.h"
+#include "user_app.h"
 
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
