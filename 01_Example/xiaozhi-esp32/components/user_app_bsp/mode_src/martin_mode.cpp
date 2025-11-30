@@ -1,37 +1,43 @@
 #include <format>
 #include <cstdio>
-#include "nvs_flash.h"
-#include "nvs.h"
-#include "esp_log.h"
-#include "user_app.h"
+#include <unordered_map>
 #include <iostream>
 #include <string>
 #include <sstream>
 #include <vector>
 #include <chrono>
 #include <iomanip>
-#include <string.h>
+#include <string>
+#include <ctime>
+#include <cJSON.h>
+
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "nvs_flash.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_sntp.h"
-#include "mbedtls/debug.h"
-#include "cJSON.h"
+#include "esp_sleep.h"
+#include "esp_log.h"
+
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
 #include "epaper_port.h"
 #include "GUI_Paint.h"
-#include "private.h"
-#include "esp_sleep.h"
-#include "button_bsp.h"
-#include "driver/rtc_io.h"
-#include "calendar.h"
-#include <ctime>
 #include "led_bsp.h"
 #include "axp_prot.h"
+#include "mbedtls/debug.h"
+#include "button_bsp.h"
+#include "driver/rtc_io.h"
+
+#include "calendar.h"
+#include "user_app.h"
+#include "private.h"
+
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
 #define ext_wakeup_pin_2 GPIO_NUM_5 
