@@ -29,7 +29,6 @@
 #include "button_bsp.h"
 #include "driver/rtc_io.h"
 #include "calendar.h"
-#include "board.h"
 #include <ctime>
 #include "led_bsp.h"
 #include "axp_prot.h"
@@ -237,6 +236,9 @@ void initialize_sntp(void) {
     while (!time_synced) {
         vTaskDelay(pdMS_TO_TICKS(100));  // Sleep for 100ms before checking again
     }
+
+    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);  // Set timezone to UTC (change as needed)
+    tzset();
 }
 
 
