@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cstring> 
 
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
@@ -30,11 +31,13 @@
 #include "GUI_Paint.h"
 #include "led_bsp.h"
 #include "mbedtls/debug.h"
+#include "ssid_manager.h"
 
 #include "calendar.h"
 #include "private.h"
 #include "user_app.h"
 
+#include "wifi_configuration_ap.h"
 
 #define ext_wakeup_pin_1 GPIO_NUM_0 
 #define ext_wakeup_pin_2 GPIO_NUM_5 
@@ -51,7 +54,7 @@ static uint8_t *epd_blackImage = NULL;
 static uint32_t Imagesize;             
 
 
-static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60*60*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
+static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60ULL*60*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
 
 static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
 static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
@@ -144,6 +147,10 @@ static void get_wakeup_gpio(void) {
             // //Reset the 10-second timer
             xEventGroupSetBits(boot_groups, set_bit_button(0)); 
         } else if (wakeup_pins & (1ULL << ext_wakeup_pin_3)) {
+            
+            auto& wifi_ap = WifiConfigurationAp::GetInstance();
+            wifi_ap.SetSsidPrefix("ESP32");
+            wifi_ap.Start();
             return;
         }
     } else if (ESP_SLEEP_WAKEUP_TIMER == wakeup_reason) {
@@ -169,9 +176,12 @@ static void default_sleep_user_Task(void *arg) {
                     ESP_EXT1_WAKEUP_ANY_LOW)); 
                 ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
                 ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
-                esp_sleep_enable_timer_wakeup(basic_rtc_set_time);
+                
+                if(esp_sleep_enable_timer_wakeup(basic_rtc_set_time) != ESP_OK){
+                    ESP_LOGE(TAG, "Deep sleep duration out of range");
+                }   
                 //axp_basic_sleep_start(); 
-                ESP_LOGI(TAG, "Starting deep sleep (sleep task)");
+                ESP_LOGI(TAG, "Starting deep sleep (sleep task) %u micros", (uint32_t)basic_rtc_set_time);
                 vTaskDelay(pdMS_TO_TICKS(500));
                 
     
@@ -193,8 +203,16 @@ std::string getDateString(int offsetDays = 0) {
     return oss.str();
 }
 
+#define WIFI_SSID_MAX_LEN 32
+#define WIFI_PASS_MAX_LEN 64
+
+
 // Connect to Wi-Fi
 void wifi_init_sta(void) {
+    
+    SsidManager& ssidManager = SsidManager::GetInstance();
+    std::vector<SsidItem> ssids = ssidManager.GetSsidList();
+
     esp_netif_init();
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
@@ -207,15 +225,24 @@ void wifi_init_sta(void) {
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         &wifi_event_handler, NULL, NULL);
 
+    std::string ssid = ssids[0].ssid;                                        
+    std::string password = ssids[0].password;
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
             .threshold = {
                 .authmode = WIFI_AUTH_WPA2_PSK,
             },
         },
     };
+
+    // Ensure SSID is copied correctly (max length is WIFI_SSID_MAX_LEN)
+    std::strncpy((char*)wifi_config.sta.ssid, ssid.c_str(), WIFI_SSID_MAX_LEN);
+    wifi_config.sta.ssid[WIFI_SSID_MAX_LEN - 1] = '\0';  // Null-terminate in case the SSID is too long
+
+    // Ensure password is copied correctly (max length is WIFI_PASS_MAX_LEN)
+    std::strncpy((char*)wifi_config.sta.password, password.c_str(), WIFI_PASS_MAX_LEN);
+    wifi_config.sta.password[WIFI_PASS_MAX_LEN - 1] = '\0';  // Null-terminate in case the password is too long
+
 
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
@@ -547,28 +574,53 @@ void DownloadWeather(){
     
 }
 
-bool isCurrentTimeHigherThan(const std::string targetTime) {
-    // Get current time
+/**
+ * @brief Checks if the current system time is higher (later) than a specified target date and time.
+ * 
+ * @param targetDateTime The target date and time in ISO format: "YYYY-MM-DDTHH:MM:SS" (seconds are optional).
+ * @return bool True if current time is strictly later than target time, false otherwise.
+ */
+bool isCurrentTimeHigherThan(const std::string targetDateTime) {
+    // 1. Get current time_t timestamp (seconds since Unix Epoch)
     time_t now = time(0);
-    struct tm currentTime;
-    localtime_r(&now, &currentTime);
     
-    // Extract current time in hours and minutes
-    int currentHour = currentTime.tm_hour;
-    int currentMinute = currentTime.tm_min;
-    
-    // Parse the target time (24:00)
-    int targetHour, targetMinute;
-    char colon;
-    std::stringstream(targetTime) >> targetHour >> colon >> targetMinute;
+    // 2. Prepare a struct tm for the target time parsing
+    struct tm targetTm = {0}; // Initialize to all zeros
 
-    // Convert both times to minutes for easier comparison
-    int currentTimeInMinutes = currentHour * 60 + currentMinute;
-    int targetTimeInMinutes = targetHour * 60 + targetMinute;
+    // 3. Parse the input string into the struct tm using std::get_time (C++11/14/17)
+    // The format string "%Y-%m-%d %H:%M:%S" works for the full format.
+    // We try to parse the string using a stringstream for more robust parsing.
+    std::istringstream ss(targetDateTime);
     
-    std::cout << currentTimeInMinutes << " " << targetTimeInMinutes << std::endl;
+    // Check if the format includes seconds or just minutes
+    const char* formatStr = "%Y-%m-%dT%H:%M:%S";
+    if (targetDateTime.find_last_of(':') == targetDateTime.length() - 3) {
+        // Assume format "YYYY-MM-DD HH:MM"
+        formatStr = "%Y-%m-%dT%H:%M";
+    }
 
-    return currentTimeInMinutes > targetTimeInMinutes;
+    ss >> std::get_time(&targetTm, formatStr);
+
+    if (ss.fail()) {
+        std::cerr << "Error: Failed to parse target time string. Use format 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD HH:MM'." << std::endl;
+        return false; // Or handle error as needed
+    }
+
+    // 4. Convert the parsed struct tm into a time_t timestamp
+    // mktime() adjusts fields and handles time zones/daylight savings based on local settings.
+    time_t targetTimestamp = std::mktime(&targetTm);
+
+    if (targetTimestamp == -1) {
+        std::cerr << "Error: Invalid target date/time provided." << std::endl;
+        return false;
+    }
+    
+    // Optional: Print timestamps for debugging
+    // std::cout << "Current Epoch Time: " << now << std::endl;
+    // std::cout << "Target Epoch Time:  " << targetTimestamp << std::endl;
+
+    // 5. Compare the two time_t values
+    return now > targetTimestamp;
 }
 
 void DrawWeather(float xOffset, float yOffset) {
@@ -611,7 +663,7 @@ void DrawWeather(float xOffset, float yOffset) {
                 Date date;
                 date.FromYYYY_MM_DD(datestr);
                 std::cout << "timestr: " << timestr << std::endl;
-                if(first && isCurrentTimeHigherThan(timestr)){
+                if(first && isCurrentTimeHigherThan(datetime)){
                     idx++;
                     continue;
                 }
@@ -781,11 +833,13 @@ static void pwr_button_user_Task(void *arg) {
             ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(ext_wakeup_pin_1_mask | ext_wakeup_pin_3_mask, ESP_EXT1_WAKEUP_ANY_LOW)); 
             ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
             ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
-            esp_sleep_enable_timer_wakeup(basic_rtc_set_time);
+            if(esp_sleep_enable_timer_wakeup(basic_rtc_set_time) != ESP_OK){
+                ESP_LOGE(TAG, "Deep sleep duration out of range");
+            }
             //axp_basic_sleep_start();
             vTaskDelay(pdMS_TO_TICKS(500));
             
-            ESP_LOGI(TAG, "Starting deep sleep (power button)");
+            ESP_LOGI(TAG, "Starting deep sleep (power button) %u micros", (uint32_t)basic_rtc_set_time);
                 
             esp_deep_sleep_start(); 
         }
