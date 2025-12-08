@@ -9,7 +9,7 @@
 #include <sstream>
 #include <iomanip>
 
-
+bool isCurrentTimeHigherThan(const std::string targetDateTime);
 
 struct Date {
     int year, month, day;

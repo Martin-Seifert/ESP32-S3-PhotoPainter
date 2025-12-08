@@ -4,9 +4,11 @@ idf_component_register(
   "mode_src/Network_mode.cpp"
   "mode_src/Basic_mode.cpp" 
   "mode_src/Mode_Selection.cpp"
-  "mode_src/martin_mode.cpp"
-  "mode_src/calendar.cpp"
-  "mode_src/encoding.cpp"
+  "mode_src/martin_mode/martin_mode.cpp"
+  "mode_src/martin_mode/weather.cpp"
+  "mode_src/martin_mode/wifi.cpp"
+  "mode_src/martin_mode/calendar.cpp"
+  "mode_src/martin_mode/encoding.cpp"
   "user_app.cpp" 
   PRIV_REQUIRES 
   driver 

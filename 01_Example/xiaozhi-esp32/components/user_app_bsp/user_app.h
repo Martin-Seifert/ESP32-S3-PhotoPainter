@@ -39,6 +39,5 @@ void User_Network_mode_app_init(void);
 
 void Mode_Selection_Init(void);
 
-std::string utf8_to_latin1(const std::string& utf8_str);
 
 #endif

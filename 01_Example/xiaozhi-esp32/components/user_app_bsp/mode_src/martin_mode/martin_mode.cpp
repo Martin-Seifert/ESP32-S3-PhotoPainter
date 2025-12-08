@@ -7,19 +7,15 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <unordered_map>
+
 #include <vector>
 #include <cstring> 
 
-#include "esp_crt_bundle.h"
+
 #include "esp_event.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_sleep.h"
-#include "esp_sntp.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -31,11 +27,13 @@
 #include "GUI_Paint.h"
 #include "led_bsp.h"
 #include "mbedtls/debug.h"
-#include "ssid_manager.h"
 
 #include "calendar.h"
 #include "private.h"
 #include "user_app.h"
+#include "wifi.h"
+#include "weather.h"
+#include "encoding.h"
 
 #include "wifi_configuration_ap.h"
 
@@ -43,10 +41,7 @@
 #define ext_wakeup_pin_2 GPIO_NUM_5 
 #define ext_wakeup_pin_3 GPIO_NUM_4 
 
-#define MAX_HTTP_OUTPUT_BUFFER 2048*16
 
-static char *output_buffer;  // Buffer to store response
-static int output_len;       // Current length of data
 
 static const char *TAG = "MartinMode";
 
@@ -62,21 +57,9 @@ static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
 static uint8_t           wakeup_basic_flag = 0;
 
 
-cJSON* root;
+static cJSON* root = NULL;
 
-// Event handler for Wi-Fi
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "Retrying Wi-Fi connection...");
-    }
-}
+
 
 
 
@@ -203,153 +186,8 @@ std::string getDateString(int offsetDays = 0) {
     return oss.str();
 }
 
-#define WIFI_SSID_MAX_LEN 32
-#define WIFI_PASS_MAX_LEN 64
 
 
-// Connect to Wi-Fi
-void wifi_init_sta(void) {
-    
-    SsidManager& ssidManager = SsidManager::GetInstance();
-    std::vector<SsidItem> ssids = ssidManager.GetSsidList();
-
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                        &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                        &wifi_event_handler, NULL, NULL);
-
-    std::string ssid = ssids[0].ssid;                                        
-    std::string password = ssids[0].password;
-    wifi_config_t wifi_config = {
-        .sta = {
-            .threshold = {
-                .authmode = WIFI_AUTH_WPA2_PSK,
-            },
-        },
-    };
-
-    // Ensure SSID is copied correctly (max length is WIFI_SSID_MAX_LEN)
-    std::strncpy((char*)wifi_config.sta.ssid, ssid.c_str(), WIFI_SSID_MAX_LEN);
-    wifi_config.sta.ssid[WIFI_SSID_MAX_LEN - 1] = '\0';  // Null-terminate in case the SSID is too long
-
-    // Ensure password is copied correctly (max length is WIFI_PASS_MAX_LEN)
-    std::strncpy((char*)wifi_config.sta.password, password.c_str(), WIFI_PASS_MAX_LEN);
-    wifi_config.sta.password[WIFI_PASS_MAX_LEN - 1] = '\0';  // Null-terminate in case the password is too long
-
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
-
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
-}
-
-
-bool time_synced;
-void time_sync_callback(struct timeval *tv) {
-    time_synced = true;  // Set the flag to true once the time is synchronized
-}
-
-void initialize_sntp(void) {
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
-    esp_sntp_set_time_sync_notification_cb(time_sync_callback);
-    esp_sntp_init();
-
-    while (!time_synced) {
-        vTaskDelay(pdMS_TO_TICKS(100));  // Sleep for 100ms before checking again
-    }
-
-    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);  // Set timezone to UTC (change as needed)
-    tzset();
-}
-
-
-esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
-    switch (evt->event_id) {
-        case HTTP_EVENT_ON_DATA:
-            if (esp_http_client_is_chunked_response(evt->client)) {
-                // Allocate buffer if not already done
-                if (output_buffer == NULL) {
-                    output_buffer = (char*)malloc(MAX_HTTP_OUTPUT_BUFFER);
-                    output_len = 0;
-                }
-                // Copy chunk into buffer
-                if (evt->data_len + output_len < MAX_HTTP_OUTPUT_BUFFER) {
-                    memcpy(output_buffer + output_len, evt->data, evt->data_len);
-                    output_len += evt->data_len;
-                }
-            } else {
-                printf("%.*s", evt->data_len, (char*)evt->data);
-            
-            }
-            break;
-
-        case HTTP_EVENT_ON_FINISH:
-            if (output_buffer != NULL) {
-                output_buffer[output_len] = '\0';  // Null-terminate
-                
-                if(root != NULL){
-                    cJSON_Delete(root);
-                    root = NULL;
-                }
-
-                // Parse JSON
-                root = cJSON_Parse(output_buffer);
-                if (root == NULL) {
-                    printf("JSON Parse Error!\n");
-                }
-
-                free(output_buffer);
-                output_buffer = NULL;
-                output_len = 0;
-            }
-            break;
-
-        default:
-            break;
-    }
-    return ESP_OK;
-}
-
-// Download file from URL
-void DownloadJSON(std::string url){
-  
-    root = NULL;
-    printf("Downloading %s\n",url.c_str());
-    
-    esp_http_client_config_t config = {
-        .url = url.c_str(),
-        .event_handler = _http_event_handler,
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .buffer_size = 1024*1024,
-        .crt_bundle_attach = esp_crt_bundle_attach,        
-        
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        
-        int status = esp_http_client_get_status_code(client);
-        int length = esp_http_client_get_content_length(client);
-        ESP_LOGI(TAG, "HTTP GET Status = %d, Response Length = %d",
-                 status, length);
-
-
-    } else {
-        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
-    }
-
-    esp_http_client_cleanup(client);
-}
 
 void DownloadAbfall(void) {
     
@@ -364,7 +202,7 @@ void DownloadAbfall(void) {
                     "&fromDate=" + fromDate +
                     "&toDate=" + toDate;
     
-    DownloadJSON(url);
+    root = DownloadJSON(url);
 }
 
 void ClearImage(void){
@@ -518,199 +356,9 @@ void DrawAbfall(EventCalendar* calendar){
 
         ESP_LOGI(TAG, "Received no abfall data");
         
-    }
-
-    
-               
+    }               
 }
 
-
-static const std::unordered_map<int, std::string> wmoPhenomenonLookup = {
-    {0, "Klarer Himmel"},
-    {1, "Hauptsächlich klar"},
-    {2, "Teilweise bewölkt"},
-    {3, "Bedeckt"},
-    {45, "Nebel"},
-    {48, "Reifnebel"},
-    {51, "Leichter Nieselregen"},
-    {53, "Mäßiger Nieselregen"},
-    {55, "Dichter Nieselregen"},
-    {56, "Gefrier-Nieselregen"},
-    {57, "Gefrier-Nieselregen+"},
-    {61, "Leichter Regen"},
-    {63, "Mäßiger Regen"},
-    {65, "Starker Regen"},
-    {66, "Leichter Gefrieregen"},
-    {67, "Starker Gefrierregen"},
-    {71, "Leichter Schneefall"},
-    {73, "Mäßiger Schneefall"},
-    {75, "Starker Schneefall"},
-    {77, "Schneekörner"},
-    {80, "Leichte Regenschauer"},
-    {81, "Mäßige Regenschauer"},
-    {82, "Starke Regenschauer"},
-    {85, "Leichter Schneeregen"},
-    {86, "Starker Schneeregen"},
-    {95, "Gewitter"},
-    {96, "Leichter Hagel"},
-    {99, "Starker Hagel"}
-};
-
-std::string WMOLookup(int code){
-
-    if (wmoPhenomenonLookup.find(code) != wmoPhenomenonLookup.end()) {
-        return wmoPhenomenonLookup.at(code);
-    } else {
-        return "Unbekannt";
-    }
-
-
-}
-
-
-void DownloadWeather(){
-
-    DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&hourly=precipitation,rain,showers,temperature_2m,relative_humidity_2m,weather_code&timezone=auto&forecast_days=2", lat, lon));
-    
-}
-
-/**
- * @brief Checks if the current system time is higher (later) than a specified target date and time.
- * 
- * @param targetDateTime The target date and time in ISO format: "YYYY-MM-DDTHH:MM:SS" (seconds are optional).
- * @return bool True if current time is strictly later than target time, false otherwise.
- */
-bool isCurrentTimeHigherThan(const std::string targetDateTime) {
-    // 1. Get current time_t timestamp (seconds since Unix Epoch)
-    time_t now = time(0);
-    
-    // 2. Prepare a struct tm for the target time parsing
-    struct tm targetTm = {0}; // Initialize to all zeros
-
-    // 3. Parse the input string into the struct tm using std::get_time (C++11/14/17)
-    // The format string "%Y-%m-%d %H:%M:%S" works for the full format.
-    // We try to parse the string using a stringstream for more robust parsing.
-    std::istringstream ss(targetDateTime);
-    
-    // Check if the format includes seconds or just minutes
-    const char* formatStr = "%Y-%m-%dT%H:%M:%S";
-    if (targetDateTime.find_last_of(':') == targetDateTime.length() - 3) {
-        // Assume format "YYYY-MM-DD HH:MM"
-        formatStr = "%Y-%m-%dT%H:%M";
-    }
-
-    ss >> std::get_time(&targetTm, formatStr);
-
-    if (ss.fail()) {
-        std::cerr << "Error: Failed to parse target time string. Use format 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD HH:MM'." << std::endl;
-        return false; // Or handle error as needed
-    }
-
-    // 4. Convert the parsed struct tm into a time_t timestamp
-    // mktime() adjusts fields and handles time zones/daylight savings based on local settings.
-    time_t targetTimestamp = std::mktime(&targetTm);
-
-    if (targetTimestamp == -1) {
-        std::cerr << "Error: Invalid target date/time provided." << std::endl;
-        return false;
-    }
-    
-    // Optional: Print timestamps for debugging
-    // std::cout << "Current Epoch Time: " << now << std::endl;
-    // std::cout << "Target Epoch Time:  " << targetTimestamp << std::endl;
-
-    // 5. Compare the two time_t values
-    return now > targetTimestamp;
-}
-
-void DrawWeather(float xOffset, float yOffset) {
-
-    if(root != NULL){
-        
-        cJSON* current = cJSON_GetObjectItem(root, "current");
-        if(current){
-            
-            double temp = cJSON_GetObjectItem(current, "temperature_2m")->valuedouble;
-            double humidity = cJSON_GetObjectItem(current, "relative_humidity_2m")->valueint;
-            int code = cJSON_GetObjectItem(current, "weather_code")->valueint;
-
-            std::string str1 = (std::ostringstream() << std::fixed << std::setprecision(0) << temp << "°C " << humidity << "%").str();
-            std::string str2 = (std::ostringstream() << std::fixed << std::setprecision(0) << WMOLookup(code)).str();
-
-            Paint_DrawString_EN(xOffset, yOffset, str1.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-            yOffset +=30;
-            Paint_DrawString_EN(xOffset, yOffset, str2.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-            yOffset +=30;
-        }
-
-        cJSON* hourly = cJSON_GetObjectItem(root, "hourly");
-        if(hourly){
-            
-            cJSON* weather_codes = cJSON_GetObjectItem(hourly, "weather_code");
-            cJSON* times = cJSON_GetObjectItem(hourly, "time");
-            cJSON* entry;
-            int lastCode = -1;
-            int idx = 0;
-            Date lastDate;
-            bool first = true;
-            std::string text;
-            
-            cJSON_ArrayForEach(entry, weather_codes){
-        
-                std::string datetime = std::string(cJSON_GetArrayItem(times, idx)->valuestring);
-                std::string datestr = datetime.substr(0, 10);
-                std::string timestr = datetime.substr(11);
-                Date date;
-                date.FromYYYY_MM_DD(datestr);
-                std::cout << "timestr: " << timestr << std::endl;
-                if(first && isCurrentTimeHigherThan(datetime)){
-                    idx++;
-                    continue;
-                }
-
-                int code = entry->valueint;
-                if(lastCode != code){
-                
-                    if(yOffset > Paint.Height - 30) return;
-
-                    if(first){
-                        text = "Wetter heute";
-                        if(yOffset > Paint.Height - 60) return;
-
-                        Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-                        yOffset +=30;
-                        lastDate = date;
-                        first = false;
-                    }
-                    else if(date > lastDate){
-                        text = "Wetter morgen";
-                        if(yOffset > Paint.Height - 60) return;
-
-                        Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-                        yOffset+=30;
-                        lastDate = date;
-                        
-                    }
-                    
-                    
-                    std::string time = datetime.substr(11);
-
-                    text = time + " " + WMOLookup(code);
-                    Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
-                    yOffset +=30;
-                }
-                lastCode = code;
-                idx++;
-            }
-
-
-
-        }
-        
-
-
-    }
-}
 
 void DrawCalendar(EventCalendar* calendar, int startX, int startY){
 
@@ -758,7 +406,6 @@ void DrawCalendar(EventCalendar* calendar, int startX, int startY){
 
 }
 
-
 void DrawBattery(){
     
     int battery_level = axp2101_getBattPercent();
@@ -774,14 +421,10 @@ void DrawBattery(){
 
 void mainRoutine(void){
     
-    wifi_init_sta();
+    InitWifi();
 
     auto calendar = new EventCalendar();
 
-    // Wait for Wi-Fi connection
-    vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-    initialize_sntp();
     // // Download file
     
     ESP_LOGI(TAG, "Set time to:");
@@ -797,7 +440,7 @@ void mainRoutine(void){
     DownloadWeather();
     DrawWeather(10, 400);
     
-    DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
+    root = DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
     
     if(root != NULL){
         cJSON* entry;
@@ -813,7 +456,7 @@ void mainRoutine(void){
 
     DrawCalendar(calendar, 10, 10);
 
-    esp_wifi_stop();
+    StopWifi();
     DrawBattery();
     ESP_LOGI(TAG, "Start painting");
     epaper_port_display(epd_blackImage); 
@@ -882,65 +525,3 @@ void User_Martin_mode_app_init(void) {
     
      
 }
-// void PrintAllData(const char *partition){
-//     esp_err_t ret = nvs_flash_init();
-//     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-//         ESP_ERROR_CHECK(nvs_flash_erase());
-//         ESP_ERROR_CHECK(nvs_flash_init());
-//     }
-
-//     nvs_iterator_t it;
-//     esp_err_t res = nvs_entry_find(partition, NULL, NVS_TYPE_ANY, &it);
-
-//     while (res == ESP_OK) {
-//         nvs_entry_info_t info;
-//         nvs_entry_info(it, &info);
-//         ESP_LOGI(TAG, "Key: %s, Type: %d", info.key, info.type);
-        
-//         // Open the namespace to read the value
-//         nvs_handle_t handle;
-//         if (nvs_open(info.namespace_name, NVS_READONLY, &handle) == ESP_OK) {
-         
-//             switch (info.type) {
-//                 case NVS_TYPE_I32: {
-//                     int32_t val;
-//                     if (nvs_get_i32(handle, info.key, &val) == ESP_OK) {
-//                         ESP_LOGI(TAG, "  Value (int32): %d", val);
-//                     }
-//                     break;
-//                 }
-//                 case NVS_TYPE_STR: {
-//                     size_t required_size;
-//                     if (nvs_get_str(handle, info.key, NULL, &required_size) == ESP_OK) {
-//                         char *buf = static_cast<char*>(malloc(required_size));
-//                         if (nvs_get_str(handle, info.key, buf, &required_size) == ESP_OK) {
-//                             ESP_LOGI(TAG, "  Value (string): %s", buf);
-//                         }
-//                         free(buf);
-//                     }
-//                     break;
-//                 }
-//                 case NVS_TYPE_BLOB: {
-//                     size_t blob_size;
-//                     if (nvs_get_blob(handle, info.key, NULL, &blob_size) == ESP_OK) {
-//                         uint8_t *blob = static_cast<uint8_t*>(malloc(blob_size));
-//                         if (nvs_get_blob(handle, info.key, blob, &blob_size) == ESP_OK) {
-//                             ESP_LOGI(TAG, "  Value (blob, %d bytes)", blob_size);
-//                             // You can hex‑dump blob here if needed
-//                         }
-//                         free(blob);
-//                     }
-//                     break;
-//                 }
-//                 default:
-//                     ESP_LOGI(TAG, "  Value type not handled yet");
-//                     break;
-//             }
-//             nvs_close(handle);
-//         }
-
-//         res = nvs_entry_next(&it);
-//     }
-
-//     nvs_release_iterator(it);
-// }
