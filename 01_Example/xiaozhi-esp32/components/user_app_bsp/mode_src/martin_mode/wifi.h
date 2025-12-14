@@ -4,8 +4,9 @@
 
 #include <cJSON.h>
 #include <string>
+#include "esp_err.h"
 
-void InitWifi();
+esp_err_t InitWifi();
 cJSON* DownloadJSON(std::string url);
 void StopWifi(); 
 

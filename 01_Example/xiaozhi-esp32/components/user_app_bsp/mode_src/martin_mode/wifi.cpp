@@ -2,6 +2,7 @@
 #include <cJSON.h>
 #include <string.h>
 #include <cstring> 
+#include <iostream>
 
 #include "esp_wifi.h"
 #include "esp_sntp.h"
@@ -23,19 +24,8 @@ static int output_len;       // Current length of data
 static const char *TAG = "WIFI";
 
 cJSON* json;
-
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "Retrying Wi-Fi connection...");
-    }
-}
+bool connected = false;
+bool tryReconnect = true;
 
 bool time_synced;
 void time_sync_callback(struct timeval *tv) {
@@ -56,26 +46,95 @@ void initialize_sntp(void) {
     tzset();
 }
 
-// Connect to Wi-Fi
-void InitWifi(void) {
-    
-    SsidManager& ssidManager = SsidManager::GetInstance();
-    std::vector<SsidItem> ssids = ssidManager.GetSsidList();
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data) {
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if(tryReconnect){
+            ESP_LOGI(TAG, "Wi-Fi disconnected. Trying reconnect...");
+            esp_wifi_connect();
+        } else {
+            ESP_LOGI(TAG, "Wi-Fi disconnected");
+        }
+        connected = false;
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED){
+        connected = true;
+        initialize_sntp();
+    }
+}
 
-    esp_netif_init();
+
+
+// Connect to Wi-Fi
+esp_err_t InitWifi(void) {
+    
+    
+    ESP_ERROR_CHECK(esp_netif_init());
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                        &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                        &wifi_event_handler, NULL, NULL);
 
-    std::string ssid = ssids[0].ssid;                                        
-    std::string password = ssids[0].password;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        &wifi_event_handler, NULL, NULL));
+
+    // Start scanning for Wi-Fi networks
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    SsidManager& ssidManager = SsidManager::GetInstance();
+    std::vector<SsidItem> ssids = ssidManager.GetSsidList();
+
+    uint16_t num_ap = 0;
+    wifi_ap_record_t* ap_info;
+    
+    int tries = 0;
+    while(num_ap == 0 && tries < 10){
+        
+        ESP_ERROR_CHECK(esp_wifi_scan_start(NULL, true));   
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&num_ap));
+        tries++;
+    }
+    if(num_ap == 0) {
+        
+        ESP_LOGE(TAG, "No suitable Wi-Fi network found.");
+        return ESP_ERR_WIFI_NOT_CONNECT;
+    }
+    ap_info = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * num_ap);
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&num_ap, ap_info));
+
+    // Find the network with the highest RSSI (strongest signal)
+    int best_rssi = -128;  // RSSI range is -128 to 0
+    std::string best_ssid;
+    std::string best_password;
+
+    ESP_LOGI(TAG, "Found %d wifis", num_ap);
+    for (int i = 0; i < num_ap; i++) {
+
+        if (ap_info[i].rssi > best_rssi) {
+            best_rssi = ap_info[i].rssi;
+
+            // Find the SSID and password of the strongest network
+            for (const auto& ssid_item : ssids) {
+                if (ssid_item.ssid == std::string(reinterpret_cast<char*>(ap_info[i].ssid))) {
+                    best_ssid = ssid_item.ssid;
+                    best_password = ssid_item.password;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Clean up
+    free(ap_info);
+
+    // Set up Wi-Fi configuration
     wifi_config_t wifi_config = {
         .sta = {
             .threshold = {
@@ -84,26 +143,20 @@ void InitWifi(void) {
         },
     };
 
-    // Ensure SSID is copied correctly (max length is WIFI_SSID_MAX_LEN)
-    std::strncpy((char*)wifi_config.sta.ssid, ssid.c_str(), WIFI_SSID_MAX_LEN);
-    wifi_config.sta.ssid[WIFI_SSID_MAX_LEN - 1] = '\0';  // Null-terminate in case the SSID is too long
+    // Copy the best SSID and password
+    std::strncpy((char*)wifi_config.sta.ssid, best_ssid.c_str(), WIFI_SSID_MAX_LEN);
+    wifi_config.sta.ssid[WIFI_SSID_MAX_LEN - 1] = '\0';  // Null-terminate if too long
+    std::strncpy((char*)wifi_config.sta.password, best_password.c_str(), WIFI_PASS_MAX_LEN);
+    wifi_config.sta.password[WIFI_PASS_MAX_LEN - 1] = '\0';  // Null-terminate if too long
 
-    // Ensure password is copied correctly (max length is WIFI_PASS_MAX_LEN)
-    std::strncpy((char*)wifi_config.sta.password, password.c_str(), WIFI_PASS_MAX_LEN);
-    wifi_config.sta.password[WIFI_PASS_MAX_LEN - 1] = '\0';  // Null-terminate in case the password is too long
-
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
+    // Connect to the strongest Wi-Fi
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_connect());
+    ESP_LOGI("wifi", "Connecting to the best Wi-Fi: %s", best_ssid.c_str());
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
+    return ESP_OK;
 
-    // Wait for Wi-Fi connection
-    vTaskDelay(5000 / portTICK_PERIOD_MS);
-
-    initialize_sntp();
-    
 }
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
@@ -156,7 +209,10 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
 // Download file from URL
 cJSON* DownloadJSON(std::string url){
   
-    printf("Downloading %s\n",url.c_str());
+    while(!connected){
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    ESP_LOGI(TAG, "Downloading %s", url.c_str());
     
     esp_http_client_config_t config = {
         .url = url.c_str(),
@@ -190,5 +246,6 @@ cJSON* DownloadJSON(std::string url){
 
 
 void StopWifi(){
+    tryReconnect = false;
     esp_wifi_stop();
 }

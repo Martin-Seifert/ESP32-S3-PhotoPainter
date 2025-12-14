@@ -27,8 +27,7 @@ std::map<Date, std::string> EventCalendar::getNextDays(int days) {
     Date week_later = fromTimePoint(week_later_tp);
 
     for (const auto& [date, desc] : events) {
-         std::cout << date.day << today.day << week_later.day << std::endl;
-            
+           
         if ((date >= today && date <= week_later)) {
            result[date] = desc;
         }

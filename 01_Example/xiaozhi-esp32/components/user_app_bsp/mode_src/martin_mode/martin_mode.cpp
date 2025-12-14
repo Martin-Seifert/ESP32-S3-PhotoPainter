@@ -49,7 +49,7 @@ static uint8_t *epd_blackImage = NULL;
 static uint32_t Imagesize;             
 
 
-static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60ULL*60*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
+static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60ULL*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
 
 static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
 static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
@@ -61,7 +61,30 @@ static cJSON* root = NULL;
 
 
 
+static int getMinutesSinceDayStart() {
+    // Get the current time
+    auto now = std::chrono::system_clock::now();
+    
+    // Convert it to time_t (since time_t represents time since Unix epoch)
+    std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+    
+    // Convert to tm structure (local time)
+    std::tm* tm = std::localtime(&currentTime);
+    
+    // Calculate minutes since midnight
+    int minutesSinceMidnight = tm->tm_hour * 60 + tm->tm_min;
+    
+    return minutesSinceMidnight;
+}
 
+
+static unsigned long long GetSleepTime(){
+    
+    int dayMins = getMinutesSinceDayStart();
+    if(dayMins < startMinute) return startMinute - dayMins;
+    if(dayMins > endMinute) return startMinute + 24*60 - dayMins;
+    return intervalMinutes;
+}
 
 static void get_wakeup_gpio(void) {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -160,11 +183,12 @@ static void default_sleep_user_Task(void *arg) {
                 ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
                 ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
                 
-                if(esp_sleep_enable_timer_wakeup(basic_rtc_set_time) != ESP_OK){
+                unsigned long long sleepTime = basic_rtc_set_time * GetSleepTime();
+                if(esp_sleep_enable_timer_wakeup(sleepTime) != ESP_OK){
                     ESP_LOGE(TAG, "Deep sleep duration out of range");
                 }   
                 //axp_basic_sleep_start(); 
-                ESP_LOGI(TAG, "Starting deep sleep (sleep task) %u micros", (uint32_t)basic_rtc_set_time);
+                ESP_LOGI(TAG, "Starting deep sleep (sleep task) %u seconds", (uint32_t)(sleepTime/1000000));
                 vTaskDelay(pdMS_TO_TICKS(500));
                 
     
@@ -421,14 +445,21 @@ void DrawBattery(){
 
 void mainRoutine(void){
     
-    InitWifi();
+    if(InitWifi() != ESP_OK){
+        return;
+    }
 
     auto calendar = new EventCalendar();
 
     // // Download file
     
     ESP_LOGI(TAG, "Set time to:");
-    auto now = std::chrono::system_clock::now();
+    // Get the current time in the system's local timezone
+    auto now = std::chrono::zoned_time<std::chrono::local_t>(std::chrono::current_zone(), std::chrono::system_clock::now());
+    
+    // Get the current year using the year field
+    auto year = std::chrono::year(now.get_local_time());
+    
     std::time_t end_time = std::chrono::system_clock::to_time_t(now);
     std::cout << std::ctime(&end_time) << std::endl;
      
@@ -440,7 +471,7 @@ void mainRoutine(void){
     DownloadWeather();
     DrawWeather(10, 400);
     
-    root = DownloadJSON("https://feiertage-api.de/api/?jahr=2025&nur_land=BY");
+    root = DownloadJSON(std::format("https://feiertage-api.de/api/?jahr=%d&nur_land=BY", year));
     
     if(root != NULL){
         cJSON* entry;
@@ -476,13 +507,14 @@ static void pwr_button_user_Task(void *arg) {
             ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(ext_wakeup_pin_1_mask | ext_wakeup_pin_3_mask, ESP_EXT1_WAKEUP_ANY_LOW)); 
             ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(ext_wakeup_pin_3));
             ESP_ERROR_CHECK(rtc_gpio_pullup_en(ext_wakeup_pin_3));
-            if(esp_sleep_enable_timer_wakeup(basic_rtc_set_time) != ESP_OK){
+            unsigned long long sleepTime = basic_rtc_set_time * GetSleepTime();
+                if(esp_sleep_enable_timer_wakeup(sleepTime) != ESP_OK){
                 ESP_LOGE(TAG, "Deep sleep duration out of range");
             }
             //axp_basic_sleep_start();
             vTaskDelay(pdMS_TO_TICKS(500));
             
-            ESP_LOGI(TAG, "Starting deep sleep (power button) %u micros", (uint32_t)basic_rtc_set_time);
+            ESP_LOGI(TAG, "Starting deep sleep (power button) %u seconds", (uint32_t)sleepTime/1000000);
                 
             esp_deep_sleep_start(); 
         }
