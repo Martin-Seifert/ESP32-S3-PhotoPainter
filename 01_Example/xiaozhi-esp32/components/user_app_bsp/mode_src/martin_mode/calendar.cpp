@@ -1,6 +1,7 @@
 
 #include <chrono>
 #include "calendar.h"
+#include "private.h"
 
 std::chrono::system_clock::time_point toTimePoint(const Date& d) {
     std::tm tm = {};
@@ -77,11 +78,10 @@ bool isCurrentTimeHigherThan(const std::string targetDateTime) {
         std::cerr << "Error: Invalid target date/time provided." << std::endl;
         return false;
     }
-    
-    // Optional: Print timestamps for debugging
-    // std::cout << "Current Epoch Time: " << now << std::endl;
-    // std::cout << "Target Epoch Time:  " << targetTimestamp << std::endl;
 
-    // 5. Compare the two time_t values
+    int mins = (targetTm.tm_hour * 60) + targetTm.tm_min;
+    std::cout << mins << std::endl;
+    if(mins < startMinute || mins > endMinute) return true;
+    
     return now > targetTimestamp;
 }

@@ -501,7 +501,7 @@ void mainRoutine(void){
     DrawAbfall(calendar);
 
     DownloadWeather();
-    DrawWeather(395, 10);
+    DrawWeather(390, 10);
     
     DownloadFeiertage(calendar, year);
     DownloadFeiertage(calendar, year+1);

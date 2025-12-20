@@ -106,7 +106,7 @@ void DrawWeather(float xOffset, float yOffset) {
                 std::string timestr = datetime.substr(11);
                 Date date;
                 date.FromYYYY_MM_DD(datestr);
-                if(first && isCurrentTimeHigherThan(datetime)){
+                if(isCurrentTimeHigherThan(datetime)){
                     idx++;
                     continue;
                 }
