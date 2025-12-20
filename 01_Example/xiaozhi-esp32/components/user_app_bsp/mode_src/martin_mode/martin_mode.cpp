@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-
+#include <chrono>
 #include <vector>
 #include <cstring> 
 
@@ -27,6 +27,8 @@
 #include "GUI_Paint.h"
 #include "led_bsp.h"
 #include "mbedtls/debug.h"
+#include "sdcard_bsp.h"
+#include "GUI_BMPfile.h"
 
 #include "calendar.h"
 #include "private.h"
@@ -47,9 +49,9 @@ static const char *TAG = "MartinMode";
 
 static uint8_t *epd_blackImage = NULL; 
 static uint32_t Imagesize;             
+int RTC_DATA_ATTR sdcard_Basic_count = 0;
 
-
-static RTC_DATA_ATTR unsigned long long basic_rtc_set_time = 60ULL*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
+static unsigned long long basic_rtc_set_time = 60ULL*1000*1000;// User sets the wake-up time in microseconds. // The default is 60 seconds. It is awakened by a timer.
 
 static uint8_t           Basic_sleep_arg = 0; // Parameters for low-power tasks
 static SemaphoreHandle_t sleep_Semp;          // Binary call low-power task
@@ -210,7 +212,22 @@ std::string getDateString(int offsetDays = 0) {
     return oss.str();
 }
 
-
+void DrawBackground() {
+    
+    list_scan_dir("/sdcard/06_USE~1");  
+    list_node_t *sdcard_node = list_at(sdcard_scan_listhandle, sdcard_Basic_count); 
+    if (sdcard_node == NULL) {
+        sdcard_Basic_count = 0;
+        sdcard_node        = list_at(sdcard_scan_listhandle, sdcard_Basic_count);
+    }
+    
+    sdcard_Basic_count++;
+    if (sdcard_node != NULL) 
+    {
+        sdcard_node_t *sdcard_Name_node = (sdcard_node_t *) sdcard_node->val;
+        GUI_ReadBmp_RGB_6Color(sdcard_Name_node->sdcard_name, 0, 0);
+    }
+}
 
 
 void DownloadAbfall(void) {
@@ -234,7 +251,7 @@ void ClearImage(void){
     epd_blackImage  = (uint8_t *) heap_caps_malloc(Imagesize * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     assert(epd_blackImage);
 
-    Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 270, EPD_7IN3E_WHITE);
+    Paint_NewImage(epd_blackImage, EXAMPLE_LCD_WIDTH, EXAMPLE_LCD_HEIGHT, 180, EPD_7IN3E_WHITE);
     Paint_SetScale(6);
     Paint_SelectImage(epd_blackImage); 
     Paint_Clear(EPD_7IN3E_WHITE);   
@@ -383,16 +400,33 @@ void DrawAbfall(EventCalendar* calendar){
     }               
 }
 
+void DownloadFeiertage(EventCalendar* calendar, int year){
 
-void DrawCalendar(EventCalendar* calendar, int startX, int startY){
+    root = DownloadJSON(std::format("https://feiertage-api.de/api/?jahr={}&nur_land=BY", year));
+    
+    if(root != NULL){
+        cJSON* entry;
+        cJSON_ArrayForEach(entry, root) {
+            
+            std::string name(entry->string);
+            std::string datestr(cJSON_GetObjectItem(entry, "datum")->valuestring);
+            Date date;
+            date.FromYYYY_MM_DD(datestr);
+            calendar->addEvent(date, "#ffffff" + name);
+        }
+    }
+}
 
-    std::map<Date, std::string> dates = calendar->getNextDays(30);
+void DrawCalendar(EventCalendar* calendar, int startX, int startY, int endX, int endY){
+
+    std::map<Date, std::string> dates = calendar->getNextDays(7);
 
     sFONT font = Font24;
     int charWidth = font.Width;
     int y = startY;
     for (const auto& pair : dates) {
          
+        if(y >= endY) return;
         int x = startX;
         Date date = pair.first;
         std::string datestr = date.ToDD_MM();
@@ -417,7 +451,7 @@ void DrawCalendar(EventCalendar* calendar, int startX, int startY){
             int bgColor = GetClosestColor(color);
             int fgColor = (bgColor == EPD_7IN3E_WHITE || bgColor == EPD_7IN3E_YELLOW) ? EPD_7IN3E_BLACK : EPD_7IN3E_WHITE;
             
-            int maxChars = (Paint.Width - x) / charWidth;
+            int maxChars = (endX - x) / charWidth;
 
             if(maxChars <= 0) break;
             std::string l1text = utf8_to_latin1(text).substr(0, maxChars);
@@ -454,38 +488,25 @@ void mainRoutine(void){
     // // Download file
     
     ESP_LOGI(TAG, "Set time to:");
-    // Get the current time in the system's local timezone
-    auto now = std::chrono::zoned_time<std::chrono::local_t>(std::chrono::current_zone(), std::chrono::system_clock::now());
     
-    // Get the current year using the year field
-    auto year = std::chrono::year(now.get_local_time());
+    std::time_t t = std::time(nullptr);
+    std::tm* localTime = std::localtime(&t);
+    std::cout << "Local time: " << std::put_time(localTime, "%Y-%m-%d %H:%M:%S") << std::endl;
+    int year = localTime->tm_year + 1900;
     
-    std::time_t end_time = std::chrono::system_clock::to_time_t(now);
-    std::cout << std::ctime(&end_time) << std::endl;
-     
-
     ClearImage();
+    DrawBackground();
+
     DownloadAbfall();
     DrawAbfall(calendar);
 
     DownloadWeather();
-    DrawWeather(10, 400);
+    DrawWeather(395, 10);
     
-    root = DownloadJSON(std::format("https://feiertage-api.de/api/?jahr=%d&nur_land=BY", year));
+    DownloadFeiertage(calendar, year);
+    DownloadFeiertage(calendar, year+1);
     
-    if(root != NULL){
-        cJSON* entry;
-        cJSON_ArrayForEach(entry, root) {
-            
-            std::string name(entry->string);
-            std::string datestr(cJSON_GetObjectItem(entry, "datum")->valuestring);
-            Date date;
-            date.FromYYYY_MM_DD(datestr);
-            calendar->addEvent(date, "#ffffff" + name);
-        }
-    }
-
-    DrawCalendar(calendar, 10, 10);
+    DrawCalendar(calendar, 10, 10, 390, Paint.Height);
 
     StopWifi();
     DrawBattery();

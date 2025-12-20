@@ -60,7 +60,7 @@ std::string WMOLookup(int code){
 
 void DownloadWeather(){
 
-    root = DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&hourly=precipitation,rain,showers,temperature_2m,relative_humidity_2m,weather_code&timezone=auto&forecast_days=2", lat, lon));
+    root = DownloadJSON(std::format("https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&models=icon_seamless&hourly=precipitation,rain,showers,temperature_2m,relative_humidity_2m,weather_code&timezone=auto&forecast_days=2&daily=temperature_2m_min,temperature_2m_max", lat, lon));
     
 }
 
@@ -83,6 +83,9 @@ void DrawWeather(float xOffset, float yOffset) {
             Paint_DrawString_EN(xOffset, yOffset, str2.c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
             yOffset +=30;
         }
+
+        cJSON* daily = cJSON_GetObjectItem(root, "daily");
+        
 
         cJSON* hourly = cJSON_GetObjectItem(root, "hourly");
         if(hourly){
@@ -114,7 +117,22 @@ void DrawWeather(float xOffset, float yOffset) {
                     if(yOffset > Paint.Height - 30) return;
 
                     if(first){
+
                         text = "Wetter heute";
+
+                        if(daily){
+                            cJSON* minTemps = cJSON_GetObjectItem(daily, "temperature_2m_min");
+                            cJSON* maxTemps = cJSON_GetObjectItem(daily, "temperature_2m_max");
+                            double minTemp = cJSON_GetArrayItem(minTemps, 0)->valuedouble;
+                            double maxTemp = cJSON_GetArrayItem(maxTemps, 0)->valuedouble;
+                            std::string minTempStr = [] (float num) { std::ostringstream oss; oss << std::fixed << std::setprecision(0) << num; return oss.str(); }(minTemp);
+                            std::string maxTempStr = [] (float num) { std::ostringstream oss; oss << std::fixed << std::setprecision(0) << num; return oss.str(); }(maxTemp);
+
+                            text += " " + minTempStr + "/" + maxTempStr + "°C";
+                        }
+
+
+
                         if(yOffset > Paint.Height - 60) return;
 
                         Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
@@ -124,6 +142,17 @@ void DrawWeather(float xOffset, float yOffset) {
                     }
                     else if(date > lastDate){
                         text = "Wetter morgen";
+
+                        if(daily){
+                            cJSON* minTemps = cJSON_GetObjectItem(daily, "temperature_2m_min");
+                            cJSON* maxTemps = cJSON_GetObjectItem(daily, "temperature_2m_max");
+                            double minTemp = cJSON_GetArrayItem(minTemps, 1)->valuedouble;
+                            double maxTemp = cJSON_GetArrayItem(maxTemps, 1)->valuedouble;
+                            std::string minTempStr = [] (float num) { std::ostringstream oss; oss << std::fixed << std::setprecision(0) << num; return oss.str(); }(minTemp);
+                            std::string maxTempStr = [] (float num) { std::ostringstream oss; oss << std::fixed << std::setprecision(0) << num; return oss.str(); }(maxTemp);
+
+                            text += " " + minTempStr + "/" + maxTempStr + "°C";
+                        }
                         if(yOffset > Paint.Height - 60) return;
 
                         Paint_DrawString_EN(xOffset, yOffset, utf8_to_latin1(text).c_str(), &Font24, EPD_7IN3E_WHITE, EPD_7IN3E_BLACK);
@@ -147,7 +176,7 @@ void DrawWeather(float xOffset, float yOffset) {
 
         }
         
-
+        
 
     }
 }

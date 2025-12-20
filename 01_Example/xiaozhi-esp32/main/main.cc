@@ -16,7 +16,7 @@
 
 extern "C" void app_main(void) {
 
-    sleep(2);
+    sleep(2); //add to debug reset reason
 
     esp_reset_reason_t reset_reason = esp_reset_reason();
 

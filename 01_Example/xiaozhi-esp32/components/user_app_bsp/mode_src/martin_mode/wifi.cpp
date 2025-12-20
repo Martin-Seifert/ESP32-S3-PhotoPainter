@@ -59,9 +59,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             ESP_LOGI(TAG, "Wi-Fi disconnected");
         }
         connected = false;
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED){
-        connected = true;
-        initialize_sntp();
     }
 }
 
@@ -151,10 +148,16 @@ esp_err_t InitWifi(void) {
 
     // Connect to the strongest Wi-Fi
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_connect());
-    ESP_LOGI("wifi", "Connecting to the best Wi-Fi: %s", best_ssid.c_str());
+    ESP_LOGI(TAG, "Connecting to the best Wi-Fi: %s", best_ssid.c_str());
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
+    ESP_ERROR_CHECK(esp_wifi_connect());
+    
+    connected = true;
+    ESP_LOGI(TAG, "Syncing time");
+
+    initialize_sntp();
+
+    ESP_LOGI(TAG, "Wifi initialization finished.");
     return ESP_OK;
 
 }
